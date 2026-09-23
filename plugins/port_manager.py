@@ -1,5 +1,5 @@
 import psutil
-
+import socket
 
 class PortManager:
     def __init__(self):
@@ -26,8 +26,16 @@ class PortManager:
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     process_name = "Unknown"
 
+            protocol = "TCP"
+
+            if connection.type == socket.SOCK_DGRAM:
+                protocol = "UDP"
+
             port_info = {
                 "port": connection.laddr.port,
+                "address": connection.laddr.ip,
+                "protocol": protocol,
+                "status": connection.status,
                 "pid": pid,
                 "process": process_name
             }
@@ -36,6 +44,9 @@ class PortManager:
                 ports.append(port_info)
 
         return sorted(ports, key=lambda x: x["port"])
+    
+    def refresh(self):
+        return self.get_active_ports()
     
     def find_port(self, port_number):
         active_ports = self.get_active_ports()
@@ -63,7 +74,7 @@ class PortManager:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return None
         
-    def terminate_process(self, pid):
+    def terminate_process(self, port_number, pid):
         if pid is None:
             return False
 
@@ -73,10 +84,25 @@ class PortManager:
             if not process.is_running():
                 return False
 
+            connections = process.net_connections(kind="inet")
+
+            owns_port = any(
+                connection.status == "LISTEN"
+                and connection.laddr.port == port_number
+                for connection in connections
+            )
+
+            if not owns_port:
+                return False
+
             process.terminate()
             process.wait(timeout=3)
 
             return True
 
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            psutil.TimeoutExpired
+        ):
             return False
