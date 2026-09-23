@@ -36,3 +36,47 @@ class PortManager:
                 ports.append(port_info)
 
         return sorted(ports, key=lambda x: x["port"])
+    
+    def find_port(self, port_number):
+        active_ports = self.get_active_ports()
+
+        for port_info in active_ports:
+            if port_info["port"] == port_number:
+                return port_info
+
+        return None
+    
+    def get_process_details(self, pid):
+        if pid is None:
+            return None
+
+        try:
+            process = psutil.Process(pid)
+
+            return {
+                "pid": process.pid,
+                "name": process.name(),
+                "status": process.status(),
+                "username": process.username(),
+            }
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+        
+    def terminate_process(self, pid):
+        if pid is None:
+            return False
+
+        try:
+            process = psutil.Process(pid)
+
+            if not process.is_running():
+                return False
+
+            process.terminate()
+            process.wait(timeout=3)
+
+            return True
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+            return False

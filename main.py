@@ -14,17 +14,6 @@ def main():
     for plugin in plugin_manager.get_plugins():
         print("-", plugin.get_name())
 
-    print("\nActive Listening Ports:")
-
-    active_ports = port_manager.get_active_ports()
-
-    for port_info in active_ports:
-        print(
-            f"- Port: {port_info['port']} | "
-            f"PID: {port_info['pid']} | "
-            f"Process: {port_info['process']}"
-        )
-
 
 if __name__ == "__main__":
     main()
