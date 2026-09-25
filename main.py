@@ -1,18 +1,17 @@
-from core.plugin_manager import PluginManager
-from plugins.port_manager import PortManager
+import sys
+
+from PySide6.QtWidgets import QApplication
+
+from ui.main_window import MainWindow
 
 
 def main():
-    plugin_manager = PluginManager()
+    app = QApplication(sys.argv)
 
-    port_manager = PortManager()
-    plugin_manager.register_plugin(port_manager)
+    window = MainWindow()
+    window.show()
 
-    print("Ubuntu DevTools started")
-    print("Plugins:")
-
-    for plugin in plugin_manager.get_plugins():
-        print("-", plugin.get_name())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
