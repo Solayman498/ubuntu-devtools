@@ -22,8 +22,17 @@ class ProjectDetector:
 
         detected_files = []
 
-        # Search project up to 3 levels deep
-        for path in project_path.rglob("*"):
+        try:
+            entries = list(project_path.rglob("*"))
+        except (PermissionError, OSError):
+            return {
+                "type": "Unknown",
+                "confidence": "None",
+                "files": []
+            }
+
+        # Search up to 3 levels deep
+        for path in entries:
 
             if not path.is_file():
                 continue
@@ -74,11 +83,20 @@ class ProjectDetector:
             }:
                 detected_files.append(str(relative_path))
 
-            elif path.suffix in {".c", ".cpp", ".cc", ".h", ".hpp"}:
+            elif path.suffix in {
+                ".c",
+                ".cpp",
+                ".cc",
+                ".h",
+                ".hpp"
+            }:
                 detected_files.append(str(relative_path))
 
             # C# / .NET
-            elif path.suffix in {".csproj", ".sln"}:
+            elif path.suffix in {
+                ".csproj",
+                ".sln"
+            }:
                 detected_files.append(str(relative_path))
 
             # PHP
@@ -125,18 +143,17 @@ class ProjectDetector:
             elif name == ".git":
                 detected_files.append(str(relative_path))
 
-            # Windows launch script
-            elif path.suffix == ".bat":
+            # Launch scripts
+            elif path.suffix in {
+                ".bat",
+                ".sh"
+            }:
                 detected_files.append(str(relative_path))
 
-            # Linux shell script
-            elif path.suffix == ".sh":
-                detected_files.append(str(relative_path))
-
-        # Remove duplicates
         detected_files = sorted(set(detected_files))
 
         project_type = self._identify_type(
+            project_path,
             detected_files
         )
 
@@ -150,19 +167,33 @@ class ProjectDetector:
             "files": detected_files
         }
 
-    def _identify_type(self, files):
+    def _identify_type(self, project_path, files):
 
-        file_names = [
+        file_names = {
             Path(file).name
             for file in files
-        ]
+        }
 
-        # Strong dependency/configuration indicators first
+        directory_names = set()
+
+        try:
+            for item in project_path.iterdir():
+
+                if item.is_dir():
+                    directory_names.add(item.name)
+
+        except (PermissionError, OSError):
+            pass
+
+        # Strong dependency/configuration indicators
 
         if "requirements.txt" in file_names:
             return "Python"
 
         if "pyproject.toml" in file_names:
+            return "Python"
+
+        if "Pipfile" in file_names:
             return "Python"
 
         if "package.json" in file_names:
@@ -177,14 +208,10 @@ class ProjectDetector:
         ):
             return "Java / Gradle"
 
-        if (
-            "*.csproj" in files
-            or "*.sln" in files
-            or any(
-                file.endswith(".csproj")
-                or file.endswith(".sln")
-                for file in files
-            )
+        if any(
+            file.endswith(".csproj")
+            or file.endswith(".sln")
+            for file in files
         ):
             return "C# / .NET"
 
@@ -203,6 +230,34 @@ class ProjectDetector:
         if "pubspec.yaml" in file_names:
             return "Flutter / Dart"
 
+        if "Dockerfile" in file_names:
+            return "Docker"
+
+        if "CMakeLists.txt" in file_names:
+            return "C / C++"
+
+        if "Makefile" in file_names:
+            return "C / C++ / Make"
+
+        # Full-stack / custom project detection
+
+        has_frontend = "frontend" in directory_names
+        has_backend = "backend" in directory_names
+
+        has_launcher = (
+            "run.bat" in file_names
+            or "run.sh" in file_names
+        )
+
+        if has_frontend and has_backend:
+            return "Full-Stack"
+
+        if has_launcher and (
+            has_frontend
+            or has_backend
+        ):
+            return "Custom / Full-Stack"
+
         # Source-code based detection
 
         if any(
@@ -210,6 +265,12 @@ class ProjectDetector:
             for file in files
         ):
             return "Python"
+
+        if any(
+            file.endswith((".js", ".jsx", ".ts", ".tsx"))
+            for file in files
+        ):
+            return "Node.js"
 
         if any(
             file.endswith((".c", ".cpp", ".cc"))
