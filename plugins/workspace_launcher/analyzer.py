@@ -3,6 +3,7 @@ import ast
 import re
 import sys
 from plugins.workspace_launcher.dependency_classifier import DependencyClassifier
+from plugins.workspace_launcher.adapters import get_adapters
 
 
 class DependencyAnalyzer:
@@ -10,6 +11,7 @@ class DependencyAnalyzer:
     def __init__(self):
         self.name = "Dependency Analyzer"
         self.classifier = DependencyClassifier()
+        self.adapters = get_adapters()
 
         self.skip_directories = {
             ".git",
@@ -93,7 +95,13 @@ class DependencyAnalyzer:
 
         for file in files:
 
-            if file.name in self.dependency_files:
+            if (
+                file.name in self.dependency_files
+                or any(
+                    adapter.can_handle(file)
+                    for adapter in self.adapters
+                )
+            ):
                 dependency_files.append(str(file))
 
             elif file.suffix.lower() in self.source_extensions:
@@ -116,12 +124,17 @@ class DependencyAnalyzer:
                 if detected_imports:
                     imports[str(file)] = detected_imports
 
+        manifest_analysis = self.analyze_manifests(
+            dependency_files
+        )
+
         return {
             "status": "Analyzed",
             "dependency_files": dependency_files,
             "source_files": source_files,
             "languages": languages,
-            "imports": imports
+            "imports": imports,
+            "manifest_analysis": manifest_analysis
         }
 
     # --------------------------------------------------
@@ -598,15 +611,12 @@ class DependencyAnalyzer:
         dependencies = {}
 
         # Dependencies declared by project manifests
+                
         declared_dependencies = set()
 
-        for file_path in analysis["dependency_files"]:
+        for manifest in analysis["manifest_analysis"]:
 
-            manifest_dependencies = self._read_manifest(
-                file_path
-            )
-
-            for dependency in manifest_dependencies:
+            for dependency in manifest["external"]:
 
                 name = dependency["name"]
 
@@ -616,14 +626,15 @@ class DependencyAnalyzer:
                     name,
                     {
                         "name": name,
-                        "ecosystem": dependency["ecosystem"],
+                        "ecosystem": manifest["ecosystem"],
+                        "version": dependency["version"],
                         "source": [],
                         "classification": "declared_external"
                     }
                 )
 
                 dependencies[name]["source"].append(
-                    dependency["source"]
+                    manifest["file"]
                 )
 
         # Dependencies discovered from source code
@@ -749,5 +760,26 @@ class DependencyAnalyzer:
                     "ecosystem": "Node.js",
                     "source": "package.json"
                 })
-
         return dependencies
+    
+    def analyze_manifests(self, dependency_files):
+
+        results = []
+
+        for file_path in dependency_files:
+
+            for adapter in self.adapters:
+
+                if not adapter.can_handle(file_path):
+                    continue
+
+                result = adapter.analyze_manifest(
+                    file_path
+                )
+
+                results.append(result)
+
+                break
+
+        return results
+        
