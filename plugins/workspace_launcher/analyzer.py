@@ -646,6 +646,20 @@ class DependencyAnalyzer:
 
             for package in imports:
 
+                if not package:
+                    continue
+
+                # Ignore URLs and invalid import tokens
+                if (
+                    package.startswith("http://")
+                    or package.startswith("https://")
+                    or package in {"http:", "https:"}
+                ):
+                    continue
+
+                if package in declared_dependencies:
+                    continue
+
                 classification = self.classifier.classify(
                     project_path,
                     package,
@@ -653,11 +667,22 @@ class DependencyAnalyzer:
                     declared_dependencies
                 )
 
-                # Ignore built-in and local modules
                 if classification in {
                     "built_in",
                     "local"
                 }:
+                    continue
+
+                ecosystem_has_manifest = any(
+                    manifest["ecosystem"] == language
+                    and (
+                        manifest["external"]
+                        or manifest["local"]
+                    )
+                    for manifest in analysis["manifest_analysis"]
+                )
+
+                if ecosystem_has_manifest:
                     continue
 
                 if package not in dependencies:
