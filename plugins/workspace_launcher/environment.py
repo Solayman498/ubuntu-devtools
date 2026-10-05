@@ -20,6 +20,8 @@ class EnvironmentManager:
             "runtime_version": None,
             "environment_exists": False,
             "environment_path": None,
+            "disk_free_gb": None,
+            "disk_status": "Unknown",
             "status": "Unknown",
             "actions": []
         }
@@ -28,22 +30,53 @@ class EnvironmentManager:
             result["status"] = "Project Not Found"
             return result
 
+        disk = self.check_disk_space("/")
+
+        result["disk_free_gb"] = disk["free_gb"]
+
+        if disk["free_gb"] is not None:
+
+            if disk["free_gb"] < 1:
+                result["disk_status"] = "Critical"
+
+            elif disk["free_gb"] < 3:
+                result["disk_status"] = "Low"
+
+            else:
+                result["disk_status"] = "Healthy"
+
         project_type = project["type"]
-
         if project_type == "Python":
-            return self._analyze_python(project_path, result)
+            return self._analyze_python(
+                project_path,
+                result
+            )
 
-        if project_type in {"Node.js", "JavaScript", "TypeScript"}:
-            return self._analyze_node(project_path, result)
+        if project_type in {
+            "Node.js",
+            "JavaScript",
+            "TypeScript"
+        }:
+            return self._analyze_node(
+                project_path,
+                result
+            )
 
-        if project_type in {"C#", ".NET"}:
-            return self._analyze_dotnet(project_path, result)
+        if project_type in {
+            "C#",
+            ".NET"
+        }:
+            return self._analyze_dotnet(
+                project_path,
+                result
+            )
 
         result["status"] = "Runtime Detection Required"
-        result["actions"].append("Runtime analysis not implemented yet")
+        result["actions"].append(
+            "Runtime analysis not implemented yet"
+        )
 
         return result
-
     # -------------------------------------------------
     # Python
     # -------------------------------------------------
@@ -137,54 +170,62 @@ class EnvironmentManager:
                 "error": str(error)
             }
 
-    def install_python_dependencies(self, project_path):
-        project_path = Path(project_path)
+    def install_python_dependencies(
+        self,
+        project_path,
+        dependencies
+    ):
 
-        requirements_file = project_path / "requirements.txt"
-        environment_path = project_path / ".venv"
+        command_result = self.build_python_install_command(
+            project_path,
+            dependencies
+        )
 
-        if not requirements_file.exists():
+        if not command_result["success"]:
+            return command_result
+
+        command = command_result["command"]
+
+        if not command:
             return {
-                "success": False,
-                "status": "requirements.txt Not Found"
-            }
-
-        if not environment_path.exists():
-            return {
-                "success": False,
-                "status": "Virtual Environment Not Found"
-            }
-
-        pip_path = self._get_pip_path(environment_path)
-
-        if not pip_path.exists():
-            return {
-                "success": False,
-                "status": "pip Not Found"
+                "success": True,
+                "status": "No Dependencies"
             }
 
         try:
+
             result = subprocess.run(
-                [str(pip_path), "install", "-r", str(requirements_file)],
+                command,
                 capture_output=True,
                 text=True,
-                timeout=600
+                timeout=1200
             )
 
             if result.returncode != 0:
+
                 return {
                     "success": False,
                     "status": "Installation Failed",
-                    "error": result.stderr.strip()
+                    "error": result.stderr.strip(),
+                    "output": result.stdout.strip()
                 }
 
             return {
                 "success": True,
                 "status": "Dependencies Installed",
+                "installed": command[3:],
                 "output": result.stdout.strip()
             }
 
-        except (subprocess.SubprocessError, OSError) as error:
+        except subprocess.TimeoutExpired:
+
+            return {
+                "success": False,
+                "status": "Installation Timed Out"
+            }
+
+        except OSError as error:
+
             return {
                 "success": False,
                 "status": "Installation Failed",
@@ -305,6 +346,29 @@ class EnvironmentManager:
             "packages": packages,
             "count": len(packages)
         }
+    
+    def check_disk_space(self, path="/"):
+        try:
+            usage = shutil.disk_usage(path)
+
+            return {
+                "total": usage.total,
+                "used": usage.used,
+                "free": usage.free,
+                "free_gb": round(
+                    usage.free / (1024 ** 3),
+                    2
+                )
+            }
+
+        except OSError as error:
+            return {
+                "total": None,
+                "used": None,
+                "free": None,
+                "free_gb": None,
+                "error": str(error)
+            }
 
     def build_python_install_command(self, project_path, dependencies):
         project_path = Path(project_path)
