@@ -185,6 +185,18 @@ class EnvironmentManager:
             return command_result
 
         command = command_result["command"]
+        disk = self.check_installation_space(
+            dependencies
+        )
+
+        if disk["status"] == "Insufficient":
+            return {
+                "success": False,
+                "status": "Insufficient Disk Space",
+                "free_gb": disk["free_gb"],
+                "required_gb": disk["required_gb"],
+                "message": disk["message"]
+            }
 
         if not command:
             return {
@@ -369,6 +381,43 @@ class EnvironmentManager:
                 "free_gb": None,
                 "error": str(error)
             }
+    def check_installation_space(
+        self,
+        dependencies,
+        minimum_free_gb=3
+    ):
+        disk = self.check_disk_space("/")
+
+        free_gb = disk.get("free_gb")
+
+        if free_gb is None:
+            return {
+                "status": "Unknown",
+                "free_gb": None,
+                "required_gb": minimum_free_gb,
+                "message": "Unable to determine available disk space."
+            }
+
+        if free_gb < minimum_free_gb:
+            return {
+                "status": "Insufficient",
+                "free_gb": free_gb,
+                "required_gb": minimum_free_gb,
+                "message": (
+                    f"Only {free_gb} GB is available. "
+                    f"At least {minimum_free_gb} GB should be available "
+                    "before installation."
+                )
+            }
+
+        return {
+            "status": "Sufficient",
+            "free_gb": free_gb,
+            "required_gb": minimum_free_gb,
+            "message": (
+                f"{free_gb} GB is available for installation."
+            )
+        }
 
     def build_python_install_command(self, project_path, dependencies):
         project_path = Path(project_path)
