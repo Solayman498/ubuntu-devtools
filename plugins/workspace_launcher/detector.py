@@ -2,316 +2,200 @@ from pathlib import Path
 
 
 class ProjectDetector:
+    """Detect projects using root-level project markers."""
+
+    PYTHON_MARKERS = {
+        "requirements.txt",
+        "pyproject.toml",
+        "Pipfile",
+        "setup.py",
+        "setup.cfg",
+    }
+
+    PROJECT_MARKERS = {
+        # JavaScript / TypeScript
+        "package.json",
+
+        # Java
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+
+        # C / C++
+        "CMakeLists.txt",
+        "Makefile",
+
+        # PHP
+        "composer.json",
+
+        # Rust
+        "Cargo.toml",
+
+        # Go
+        "go.mod",
+        "go.work",
+
+        # Ruby
+        "Gemfile",
+
+        # Flutter / Dart
+        "pubspec.yaml",
+
+        # Docker
+        "Dockerfile",
+        "docker-compose.yml",
+        "compose.yaml",
+
+        # Swift
+        "Package.swift",
+    }
+
+    PROJECT_EXTENSIONS = {
+        ".csproj",
+        ".fsproj",
+        ".vbproj",
+        ".sln",
+        ".slnx",
+    }
+
+    SOURCE_EXTENSIONS = {
+        ".py", ".js", ".jsx", ".ts", ".tsx",
+        ".java", ".kt", ".c", ".h", ".cpp", ".hpp",
+        ".cs", ".php", ".rs", ".go", ".rb", ".dart",
+        ".swift",
+    }
 
     def detect(self, project_path):
-        project_path = Path(project_path)
+        path = Path(project_path)
 
-        if not project_path.exists():
-            return {
-                "type": "Unknown",
-                "confidence": "None",
-                "files": []
-            }
-
-        if not project_path.is_dir():
-            return {
-                "type": "Unknown",
-                "confidence": "None",
-                "files": []
-            }
-
-        detected_files = []
+        if not path.is_dir() or path.is_symlink():
+            return self._unknown()
 
         try:
-            entries = list(project_path.rglob("*"))
+            with __import__("os").scandir(path) as entries:
+                children = list(entries)
         except (PermissionError, OSError):
-            return {
-                "type": "Unknown",
-                "confidence": "None",
-                "files": []
-            }
+            return self._unknown()
 
-        # Search up to 3 levels deep
-        for path in entries:
+        files = set()
+        directories = set()
 
-            if not path.is_file():
-                continue
-
+        for entry in children:
             try:
-                relative_path = path.relative_to(project_path)
-            except ValueError:
+                if entry.is_file(follow_symlinks=False):
+                    files.add(entry.name)
+                elif entry.is_dir(follow_symlinks=False):
+                    directories.add(entry.name)
+            except OSError:
                 continue
 
-            if len(relative_path.parts) > 3:
-                continue
+        detected = set()
+        detected.update(files.intersection(self.PYTHON_MARKERS))
+        detected.update(files.intersection(self.PROJECT_MARKERS))
 
-            name = path.name
+        for filename in files:
+            if Path(filename).suffix.lower() in self.PROJECT_EXTENSIONS:
+                detected.add(filename)
 
-            # Python
-            if name in {
-                "requirements.txt",
-                "pyproject.toml",
-                "Pipfile",
-                "setup.py"
-            }:
-                detected_files.append(str(relative_path))
-
-            elif path.suffix == ".py":
-                detected_files.append(str(relative_path))
-
-            # Node.js
-            elif name in {
-                "package.json",
-                "package-lock.json",
-                "yarn.lock",
-                "pnpm-lock.yaml"
-            }:
-                detected_files.append(str(relative_path))
-
-            # Java
-            elif name in {
-                "pom.xml",
-                "build.gradle",
-                "build.gradle.kts"
-            }:
-                detected_files.append(str(relative_path))
-
-            # C / C++
-            elif name in {
-                "CMakeLists.txt",
-                "Makefile"
-            }:
-                detected_files.append(str(relative_path))
-
-            elif path.suffix in {
-                ".c",
-                ".cpp",
-                ".cc",
-                ".h",
-                ".hpp"
-            }:
-                detected_files.append(str(relative_path))
-
-            # C# / .NET
-            elif path.suffix in {
-                ".csproj",
-                ".sln"
-            }:
-                detected_files.append(str(relative_path))
-
-            # PHP
-            elif name == "composer.json":
-                detected_files.append(str(relative_path))
-
-            elif path.suffix == ".php":
-                detected_files.append(str(relative_path))
-
-            # Rust
-            elif name == "Cargo.toml":
-                detected_files.append(str(relative_path))
-
-            # Go
-            elif name == "go.mod":
-                detected_files.append(str(relative_path))
-
-            elif path.suffix == ".go":
-                detected_files.append(str(relative_path))
-
-            # Ruby
-            elif name == "Gemfile":
-                detected_files.append(str(relative_path))
-
-            elif path.suffix == ".rb":
-                detected_files.append(str(relative_path))
-
-            # Flutter / Dart
-            elif name == "pubspec.yaml":
-                detected_files.append(str(relative_path))
-
-            elif path.suffix == ".dart":
-                detected_files.append(str(relative_path))
-
-            # Docker
-            elif name in {
-                "Dockerfile",
-                "compose.yaml",
-                "docker-compose.yml"
-            }:
-                detected_files.append(str(relative_path))
-
-            # Git
-            elif name == ".git":
-                detected_files.append(str(relative_path))
-
-            # Launch scripts
-            elif path.suffix in {
-                ".bat",
-                ".sh"
-            }:
-                detected_files.append(str(relative_path))
-
-        detected_files = sorted(set(detected_files))
-
-        project_type = self._identify_type(
-            project_path,
-            detected_files
+        # A frontend/backend layout is useful supporting evidence.
+        has_frontend_backend = (
+            "frontend" in directories and "backend" in directories
         )
 
-        return {
-            "type": project_type,
-            "confidence": (
-                "High"
-                if project_type != "Unknown"
-                else "None"
-            ),
-            "files": detected_files
-        }
+        if has_frontend_backend:
+            detected.update({"frontend/", "backend/"})
 
-    def _identify_type(self, project_path, files):
+        # Strong project markers are enough to identify a project.
+        if detected:
+            project_type = self._identify_type(files, directories)
 
-        file_names = {
-            Path(file).name
-            for file in files
-        }
+            if project_type == "Unknown":
+                project_type = "Project"
 
-        directory_names = set()
+            return {
+                "type": project_type,
+                "confidence": "High",
+                "files": sorted(detected),
+            }
 
-        try:
-            for item in project_path.iterdir():
+        # A Git directory alone is not enough.
+        # README + source code provides weaker evidence of a repository.
+        has_readme = any(
+            name.lower().startswith("readme")
+            for name in files
+        )
+        has_source = any(
+            Path(name).suffix.lower() in self.SOURCE_EXTENSIONS
+            for name in files
+        )
 
-                if item.is_dir():
-                    directory_names.add(item.name)
+        if ".git" in directories and (has_readme or has_source):
+            return {
+                "type": "Git Project",
+                "confidence": "Medium",
+                "files": [".git"] + (
+                    ["README"] if has_readme else []
+                ),
+            }
 
-        except (PermissionError, OSError):
-            pass
+        return self._unknown()
 
-        # Strong dependency/configuration indicators
+    def _identify_type(self, files, directories):
+        if "frontend" in directories and "backend" in directories:
+            return "Full-Stack"
 
-        if "requirements.txt" in file_names:
+        if files.intersection(self.PYTHON_MARKERS):
             return "Python"
 
-        if "pyproject.toml" in file_names:
-            return "Python"
-
-        if "Pipfile" in file_names:
-            return "Python"
-
-        if "package.json" in file_names:
+        if "package.json" in files:
             return "Node.js"
 
-        if "pom.xml" in file_names:
-            return "Java"
+        if "pom.xml" in files:
+            return "Java / Maven"
 
-        if (
-            "build.gradle" in file_names
-            or "build.gradle.kts" in file_names
-        ):
+        if {"build.gradle", "build.gradle.kts"}.intersection(files):
             return "Java / Gradle"
 
         if any(
-            file.endswith(".csproj")
-            or file.endswith(".sln")
-            for file in files
+            Path(name).suffix.lower() in self.PROJECT_EXTENSIONS
+            for name in files
         ):
             return "C# / .NET"
 
-        if "composer.json" in file_names:
+        if "composer.json" in files:
             return "PHP"
 
-        if "Cargo.toml" in file_names:
+        if "Cargo.toml" in files:
             return "Rust"
 
-        if "go.mod" in file_names:
+        if {"go.mod", "go.work"}.intersection(files):
             return "Go"
 
-        if "Gemfile" in file_names:
+        if "Gemfile" in files:
             return "Ruby"
 
-        if "pubspec.yaml" in file_names:
+        if "pubspec.yaml" in files:
             return "Flutter / Dart"
 
-        if "Dockerfile" in file_names:
+        if "CMakeLists.txt" in files or "Makefile" in files:
+            return "C / C++"
+
+        if {
+            "Dockerfile",
+            "docker-compose.yml",
+            "compose.yaml",
+        }.intersection(files):
             return "Docker"
 
-        if "CMakeLists.txt" in file_names:
-            return "C / C++"
-
-        if "Makefile" in file_names:
-            return "C / C++ / Make"
-
-        # Full-stack / custom project detection
-
-        has_frontend = "frontend" in directory_names
-        has_backend = "backend" in directory_names
-
-        has_launcher = (
-            "run.bat" in file_names
-            or "run.sh" in file_names
-        )
-
-        if has_frontend and has_backend:
-            return "Full-Stack"
-
-        if has_launcher and (
-            has_frontend
-            or has_backend
-        ):
-            return "Custom / Full-Stack"
-
-        # Source-code based detection
-
-        if any(
-            file.endswith(".py")
-            for file in files
-        ):
-            return "Python"
-
-        if any(
-            file.endswith((".js", ".jsx", ".ts", ".tsx"))
-            for file in files
-        ):
-            return "Node.js"
-
-        if any(
-            file.endswith((".c", ".cpp", ".cc"))
-            for file in files
-        ):
-            return "C / C++"
-
-        if any(
-            file.endswith(".cs")
-            for file in files
-        ):
-            return "C# / .NET"
-
-        if any(
-            file.endswith(".php")
-            for file in files
-        ):
-            return "PHP"
-
-        if any(
-            file.endswith(".rs")
-            for file in files
-        ):
-            return "Rust"
-
-        if any(
-            file.endswith(".go")
-            for file in files
-        ):
-            return "Go"
-
-        if any(
-            file.endswith(".rb")
-            for file in files
-        ):
-            return "Ruby"
-
-        if any(
-            file.endswith(".dart")
-            for file in files
-        ):
-            return "Flutter / Dart"
+        if "Package.swift" in files:
+            return "Swift"
 
         return "Unknown"
+
+    @staticmethod
+    def _unknown():
+        return {
+            "type": "Unknown",
+            "confidence": "None",
+            "files": [],
+        }

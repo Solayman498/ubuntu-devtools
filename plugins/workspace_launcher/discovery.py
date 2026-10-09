@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from plugins.workspace_launcher.detector import ProjectDetector
@@ -5,162 +6,197 @@ from core.project_registry import ProjectRegistry
 
 
 class ProjectDiscovery:
+    SKIP_DIRECTORIES = {
+        "proc",
+        "sys",
+        "dev",
+        "run",
+        "tmp",
+        "lost+found",
+        "__pycache__",
+        "venv",
+        ".venv",
+        "env",
+        ".env",
+        "node_modules",
+        ".git",
+        ".vscode",
+        ".idea",
+        ".cache",
+        ".npm",
+        ".yarn",
+        "build",
+        "dist",
+        "target",
+        "bin",
+        "obj",
+        "vendor",
+    }
+
+    # Exclude these only when scanning the entire "/" filesystem.
+    FULL_SCAN_EXCLUDED_ROOTS = {
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run",
+        "/tmp",
+        "/var",
+        "/usr",
+        "/snap",
+        "/opt",
+        "/lost+found",
+    }
 
     def __init__(self):
         self.detector = ProjectDetector()
         self.registry = ProjectRegistry()
 
-        self.skip_directories = {
-            "proc",
-            "sys",
-            "dev",
-            "run",
-            "tmp",
-            "lost+found",
-            "__pycache__",
-            "node_modules",
-            ".git",
-            ".vscode",
-            ".idea",
-            ".cache",
-            ".config",
-            ".local",
-            ".npm",
-            ".yarn",
-            "venv",
-            ".venv",
-        }
+    def discover(self, root_path=None, mode="workspace"):
+        """
+        Discover projects without changing the registry.
 
-    def discover(self, root_path="/"):
-        root = Path(root_path)
+        mode='workspace':
+            Scan the user's home directory by default.
 
-        if not root.exists() or not root.is_dir():
+        mode='full':
+            Scan the requested root. If the root is '/',
+            exclude selected operating-system directories.
+        """
+
+        if root_path is None:
+            if mode == "full":
+                root_path = "/"
+            else:
+                root_path = str(Path.home())
+
+        root = Path(root_path).expanduser()
+
+        try:
+            root = root.resolve(strict=True)
+        except (OSError, RuntimeError):
             return []
 
-        projects = []
-        self._scan(root, projects)
+        if not root.is_dir():
+            return []
 
-        return projects
+        ignored_paths = {
+            Path(path).resolve()
+            for path in self.registry.get_ignored_paths()
+        }
 
-    def discover_and_register(self, root_path="/"):
-        projects = self.discover(root_path)
+        excluded_roots = set()
 
-        self.registry.register_projects(projects)
-
-        return projects
-
-    def _scan(self, directory, projects):
-
-        if directory.name in self.skip_directories:
-            return
-
-        try:
-            result = self.detector.detect(str(directory))
-        except (PermissionError, OSError):
-            result = None
-
-        if result and result["type"] != "Unknown":
-
-            project = {
-                "name": directory.name,
-                "path": str(directory),
-                "type": result["type"],
-                "confidence": result["confidence"],
-                "files": result["files"],
+        if mode == "full" and root == Path("/"):
+            excluded_roots = {
+                Path(path)
+                for path in self.FULL_SCAN_EXCLUDED_ROOTS
             }
 
-            if self._is_project_root(directory, result):
+        projects = []
+        visited_paths = set()
 
-                projects.append(project)
+        self._scan(
+            directory=root,
+            projects=projects,
+            ignored_paths=ignored_paths,
+            excluded_roots=excluded_roots,
+            visited_paths=visited_paths,
+            root=root,
+        )
 
-                return
+        return projects
+
+    def discover_and_register(self, root_path=None, mode="workspace"):
+        projects = self.discover(
+            root_path=root_path,
+            mode=mode,
+        )
+
+        # Avoid clearing the existing registry if a scan
+        # unexpectedly returns no results.
+        if projects:
+            self.registry.register_projects(projects)
+
+        return projects
+
+    def _scan(
+        self,
+        directory,
+        projects,
+        ignored_paths,
+        excluded_roots,
+        visited_paths,
+        root,
+    ):
+        try:
+            resolved = directory.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return
+
+        if not resolved.is_dir():
+            return
+
+        # Prevent repeated scans of the same resolved directory.
+        if resolved in visited_paths:
+            return
+
+        visited_paths.add(resolved)
+
+        # Ignore a selected project and its entire subtree.
+        if any(
+            resolved == ignored or ignored in resolved.parents
+            for ignored in ignored_paths
+        ):
+            return
+
+        # Skip excluded system roots and their descendants.
+        if any(
+            resolved == excluded or excluded in resolved.parents
+            for excluded in excluded_roots
+        ):
+            return
+
+        # Skip known non-project directories.
+        if (
+            resolved != root
+            and resolved.name in self.SKIP_DIRECTORIES
+        ):
+            return
 
         try:
-            children = list(directory.iterdir())
-        except (PermissionError, OSError):
+            result = self.detector.detect(str(resolved))
+        except (OSError, PermissionError):
+            result = None
+
+        if result and result.get("type") != "Unknown":
+            projects.append({
+                "name": resolved.name or str(resolved),
+                "path": str(resolved),
+                "type": result["type"],
+                "confidence": result.get("confidence", "Medium"),
+                "files": result.get("files", []),
+            })
+
+            # A detected project is treated as one project.
+            # Do not scan every folder inside it as another project.
+            return
+
+        try:
+            with os.scandir(resolved) as entries:
+                children = [
+                    Path(entry.path)
+                    for entry in entries
+                    if entry.is_dir(follow_symlinks=False)
+                ]
+        except (OSError, PermissionError):
             return
 
         for child in children:
-
-            if not child.is_dir():
-                continue
-
-            if child.name in self.skip_directories:
-                continue
-
-            if child.is_symlink():
-                continue
-
-            self._scan(child, projects)
-
-    def _is_project_root(self, directory, result):
-
-        try:
-            children = list(directory.iterdir())
-        except (PermissionError, OSError):
-            return False
-
-        files = {
-            child.name
-            for child in children
-            if child.is_file()
-        }
-
-        folders = {
-            child.name
-            for child in children
-            if child.is_dir()
-        }
-
-        strong_markers = {
-            "requirements.txt",
-            "pyproject.toml",
-            "Pipfile",
-            "setup.py",
-            "package.json",
-            "pom.xml",
-            "build.gradle",
-            "build.gradle.kts",
-            "CMakeLists.txt",
-            "Makefile",
-            "composer.json",
-            "Cargo.toml",
-            "go.mod",
-            "Gemfile",
-            "pubspec.yaml",
-            "Dockerfile",
-        }
-
-        if files & strong_markers:
-            return True
-
-        if "run.bat" in files or "run.sh" in files:
-            return True
-
-        if "frontend" in folders and "backend" in folders:
-            return True
-
-        source_extensions = {
-            ".py",
-            ".js",
-            ".jsx",
-            ".ts",
-            ".tsx",
-            ".java",
-            ".c",
-            ".cpp",
-            ".cc",
-            ".cs",
-            ".php",
-            ".rs",
-            ".go",
-            ".rb",
-            ".dart",
-        }
-
-        for child in children:
-
-            if child.is_file() and child.suffix in source_extensions:
-                return True
-
-        return False
+            self._scan(
+                directory=child,
+                projects=projects,
+                ignored_paths=ignored_paths,
+                excluded_roots=excluded_roots,
+                visited_paths=visited_paths,
+                root=root,
+            )
