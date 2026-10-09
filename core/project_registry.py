@@ -12,9 +12,15 @@ class ProjectRegistry:
         self.database_path = self.data_directory / "projects.db"
         self._create_database()
 
+    # -----------------------------
+    # Database connection
+    # -----------------------------
     def _connect(self):
         return sqlite3.connect(self.database_path)
 
+    # -----------------------------
+    # Create database tables
+    # -----------------------------
     def _create_database(self):
         with self._connect() as connection:
             connection.execute("""
@@ -41,14 +47,45 @@ class ProjectRegistry:
             connection.commit()
 
     # -----------------------------
+    # Normalize a project path
+    # -----------------------------
+    @staticmethod
+    def _resolve_path(path):
+        return str(Path(path).expanduser().resolve())
+
+    # -----------------------------
+    # Check whether a path is ignored
+    # -----------------------------
+    def _is_ignored(self, path, ignored_paths=None):
+        resolved_path = Path(self._resolve_path(path))
+
+        if ignored_paths is None:
+            ignored_paths = self.get_ignored_paths()
+
+        for ignored_path in ignored_paths:
+            ignored = Path(ignored_path).resolve()
+
+            # The project itself is ignored.
+            # Projects inside an ignored directory are also ignored.
+            if resolved_path == ignored or ignored in resolved_path.parents:
+                return True
+
+        return False
+
+    # -----------------------------
     # Register one project
     # -----------------------------
     def register_project(self, project):
-        resolved_path = str(Path(project["path"]).resolve())
+        resolved_path = self._resolve_path(project["path"])
 
-        # Do not register an ignored project.
-        if resolved_path in self.get_ignored_paths():
+        # Do not register ignored projects.
+        if self._is_ignored(resolved_path):
             return
+
+        confidence = project.get("confidence", "Medium")
+
+        # Preserve the manual registration marker.
+        is_manual = confidence == "Manual"
 
         with self._connect() as connection:
             connection.execute("""
@@ -72,10 +109,12 @@ class ProjectRegistry:
                 project["name"],
                 resolved_path,
                 project["type"],
-                project["confidence"],
+                confidence,
                 "Discovered",
             ))
 
+            # Keep manually registered projects marked as Manual.
+            # The INSERT/UPDATE above already uses the supplied confidence.
             connection.commit()
 
     # -----------------------------
@@ -87,22 +126,39 @@ class ProjectRegistry:
 
     # -----------------------------
     # Replace complete project list
+    # Preserves manual projects
     # -----------------------------
     def replace_projects(self, projects):
         ignored_paths = self.get_ignored_paths()
 
+        # Save existing manually registered projects before replacement.
         with self._connect() as connection:
+            manual_rows = connection.execute("""
+                SELECT
+                    name,
+                    path,
+                    project_type,
+                    confidence,
+                    status,
+                    last_scanned,
+                    last_launched
+                FROM projects
+                WHERE confidence = 'Manual'
+            """).fetchall()
+
+            # Replace the discovered list.
             connection.execute("DELETE FROM projects")
 
-            for project in projects:
-                resolved_path = str(Path(project["path"]).resolve())
+            discovered_paths = set()
 
-                if any(
-                    resolved_path == ignored
-                    or ignored in Path(resolved_path).parents
-                    for ignored in ignored_paths
-                ):
+            # Insert newly discovered projects.
+            for project in projects:
+                resolved_path = self._resolve_path(project["path"])
+
+                if self._is_ignored(resolved_path, ignored_paths):
                     continue
+
+                discovered_paths.add(resolved_path)
 
                 connection.execute("""
                     INSERT INTO projects (
@@ -114,52 +170,108 @@ class ProjectRegistry:
                         last_scanned
                     )
                     VALUES (?, ?, ?, ?, ?, datetime('now'))
+
+                    ON CONFLICT(path)
+                    DO UPDATE SET
+                        name = excluded.name,
+                        project_type = excluded.project_type,
+                        confidence = excluded.confidence,
+                        last_scanned = excluded.last_scanned
                 """, (
                     project["name"],
                     resolved_path,
                     project["type"],
-                    project["confidence"],
+                    project.get("confidence", "Medium"),
                     "Discovered",
+                ))
+
+            # Restore manual projects not rediscovered by this scan.
+            for row in manual_rows:
+                (
+                    name,
+                    path,
+                    project_type,
+                    confidence,
+                    status,
+                    last_scanned,
+                    last_launched,
+                ) = row
+
+                resolved_path = self._resolve_path(path)
+
+                if resolved_path in discovered_paths:
+                    continue
+
+                if self._is_ignored(resolved_path, ignored_paths):
+                    continue
+
+                connection.execute("""
+                    INSERT INTO projects (
+                        name,
+                        path,
+                        project_type,
+                        confidence,
+                        status,
+                        last_scanned,
+                        last_launched
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+
+                    ON CONFLICT(path) DO NOTHING
+                """, (
+                    name,
+                    resolved_path,
+                    project_type,
+                    confidence,
+                    status,
+                    last_scanned,
+                    last_launched,
                 ))
 
             connection.commit()
 
     # -----------------------------
     # Synchronize one scanned folder
+    # Preserves manual projects
     # -----------------------------
     def sync_projects_in_path(self, projects, root_path):
-        root = Path(root_path).resolve()
+        root = Path(self._resolve_path(root_path))
         ignored_paths = self.get_ignored_paths()
 
         with self._connect() as connection:
-            existing_rows = connection.execute(
-                "SELECT path FROM projects"
-            ).fetchall()
+            existing_rows = connection.execute("""
+                SELECT path, confidence
+                FROM projects
+            """).fetchall()
 
-            # Remove stale entries only inside the scanned folder.
-            for (existing_path,) in existing_rows:
-                existing = Path(existing_path).resolve()
+            # Remove stale discovered projects only inside the scanned folder.
+            # Manual projects are preserved.
+            for existing_path, confidence in existing_rows:
+                existing = Path(self._resolve_path(existing_path))
 
-                if existing == root or root in existing.parents:
-                    if not any(
-                        existing == ignored
-                        or ignored in existing.parents
-                        for ignored in ignored_paths
-                    ):
-                        connection.execute(
-                            "DELETE FROM projects WHERE path = ?",
-                            (existing_path,),
-                        )
+                is_inside_root = (
+                    existing == root or root in existing.parents
+                )
 
-            # Add or update the projects discovered in this scan.
+                if not is_inside_root:
+                    continue
+
+                if confidence == "Manual":
+                    continue
+
+                if self._is_ignored(existing, ignored_paths):
+                    continue
+
+                connection.execute(
+                    "DELETE FROM projects WHERE path = ?",
+                    (existing_path,),
+                )
+
+            # Add or update projects found during the scan.
             for project in projects:
-                resolved_path = str(Path(project["path"]).resolve())
+                resolved_path = self._resolve_path(project["path"])
 
-                if any(
-                    resolved_path == ignored
-                    or ignored in Path(resolved_path).parents
-                    for ignored in ignored_paths
-                ):
+                if self._is_ignored(resolved_path, ignored_paths):
                     continue
 
                 connection.execute("""
@@ -183,7 +295,7 @@ class ProjectRegistry:
                     project["name"],
                     resolved_path,
                     project["type"],
-                    project["confidence"],
+                    project.get("confidence", "Medium"),
                     "Discovered",
                 ))
 
@@ -220,6 +332,7 @@ class ProjectRegistry:
 
     # -----------------------------
     # Remove project from app registry
+    # Does not delete actual files
     # -----------------------------
     def remove_project(self, project_id):
         with self._connect() as connection:
@@ -227,6 +340,7 @@ class ProjectRegistry:
                 "DELETE FROM projects WHERE id = ?",
                 (project_id,),
             )
+
             connection.commit()
 
     # -----------------------------
@@ -238,13 +352,29 @@ class ProjectRegistry:
                 "UPDATE projects SET status = ? WHERE id = ?",
                 (status, project_id),
             )
+
+            connection.commit()
+
+    # -----------------------------
+    # Update last launched time
+    # -----------------------------
+    def update_last_launched(self, project_id):
+        with self._connect() as connection:
+            connection.execute("""
+                UPDATE projects
+                SET
+                    last_launched = datetime('now'),
+                    status = 'Launched'
+                WHERE id = ?
+            """, (project_id,))
+
             connection.commit()
 
     # -----------------------------
     # Ignore project permanently
     # -----------------------------
     def ignore_project(self, path, name=None):
-        resolved_path = str(Path(path).resolve())
+        resolved_path = self._resolve_path(path)
 
         if name is None:
             name = Path(resolved_path).name
@@ -255,7 +385,8 @@ class ProjectRegistry:
                 VALUES (?, ?)
 
                 ON CONFLICT(path)
-                DO UPDATE SET name = excluded.name
+                DO UPDATE SET
+                    name = excluded.name
             """, (resolved_path, name))
 
             # Remove the project from the visible registry.
@@ -286,19 +417,21 @@ class ProjectRegistry:
     # -----------------------------
     def get_ignored_paths(self):
         return {
-            str(Path(row["path"]).resolve())
+            self._resolve_path(row["path"])
             for row in self.get_ignored_projects()
         }
 
     # -----------------------------
     # Restore ignored project
+    # Removes ignore rule only
     # -----------------------------
     def restore_ignored_project(self, path):
-        resolved_path = str(Path(path).resolve())
+        resolved_path = self._resolve_path(path)
 
         with self._connect() as connection:
             connection.execute(
                 "DELETE FROM ignored_projects WHERE path = ?",
                 (resolved_path,),
             )
+
             connection.commit()
