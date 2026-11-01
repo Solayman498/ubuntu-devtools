@@ -16,6 +16,7 @@ class EnvironmentManager:
             "project": project["name"],
             "path": str(project_path),
             "type": project["type"],
+            "technologies": project.get("technologies", []),
             "runtime": None,
             "runtime_version": None,
             "environment_exists": False,
@@ -45,38 +46,125 @@ class EnvironmentManager:
             else:
                 result["disk_status"] = "Healthy"
 
-        project_type = project["type"]
-        if project_type == "Python":
-            return self._analyze_python(
-                project_path,
-                result
-            )
+        # Analyze actual technologies, not broad project classification.
+        technologies = project.get("technologies", [])
+        project_type = project.get("type", "")
+        if isinstance(technologies, str):
+            technologies = [technologies]
+        
+        # Backward compatibility with existing registry entries.
+        if not technologies:
+            type_mapping = {
+                "Python": ["Python"],
+                "Node.js": ["JavaScript"],
+                "JavaScript": ["JavaScript"],
+                "TypeScript": ["TypeScript"],
+                "C#": ["C#/.NET"],
+                ".NET": ["C#/.NET"],
+                "C# / .NET": ["C#/.NET"],
+            }
+            technologies = type_mapping.get(project_type, [])
+        
+        normalized = {
+            technology.strip().lower()
+            for technology in technologies
+            if isinstance(technology, str)
+        }
 
-        if project_type in {
-            "Node.js",
-            "JavaScript",
-            "TypeScript"
-        }:
-            return self._analyze_node(
-                project_path,
-                result
-            )
+        components = []
 
-        if project_type in {
-            "C#",
-            ".NET"
-        }:
-            return self._analyze_dotnet(
-                project_path,
-                result
-            )
+        if "python" in normalized:
+            py_result = self._analyze_python(project_path, {**result})
+            components.append({
+                "technology": "Python",
+                "runtime": py_result.get("runtime"),
+                "runtime_version": py_result.get("runtime_version"),
+                "environment_exists": py_result.get("environment_exists"),
+                "environment_path": py_result.get("environment_path"),
+                "status": py_result.get("status"),
+                "actions": py_result.get("actions", []),
+            })
 
-        result["status"] = "Runtime Detection Required"
-        result["actions"].append(
-            "Runtime analysis not implemented yet"
+        if (
+            normalized & {"javascript", "typescript", "node.js"}
+            and (project_path / "package.json").is_file()
+        ):
+            node_result = self._analyze_node(project_path, {**result})
+            components.append({
+                "technology": "Node.js",
+                "runtime": node_result.get("runtime"),
+                "runtime_version": node_result.get("runtime_version"),
+                "environment_exists": node_result.get("environment_exists"),
+                "environment_path": node_result.get("environment_path"),
+                "status": node_result.get("status"),
+                "actions": node_result.get("actions", []),
+            })
+
+        if normalized & {"c#/.net", "c#", ".net"}:
+            dotnet_result = self._analyze_dotnet(project_path, {**result})
+            components.append({
+                "technology": "C#/.NET",
+                "runtime": dotnet_result.get("runtime"),
+                "runtime_version": dotnet_result.get("runtime_version"),
+                "environment_exists": dotnet_result.get("environment_exists"),
+                "environment_path": dotnet_result.get("environment_path"),
+                "status": dotnet_result.get("status"),
+                "actions": dotnet_result.get("actions", []),
+            })
+
+        result["components"] = components
+
+        if not components:
+            result["status"] = "Runtime Detection Required"
+            result["actions"].append(
+                "No analyzer is implemented for the detected technologies"
+            )
+            return result
+
+        result["runtime"] = ", ".join(dict.fromkeys(
+            c["runtime"] for c in components if c["runtime"]
+        )) or None
+
+        result["runtime_version"] = "; ".join(
+            f'{c["technology"]}: {c["runtime_version"]}'
+            for c in components
+            if c["runtime_version"]
+        ) or None
+
+        result["environment_exists"] = all(
+            c["environment_exists"] for c in components
         )
 
+        result["environment_path"] = "; ".join(
+            dict.fromkeys(
+                c["environment_path"]
+                for c in components
+                if c["environment_path"]
+            )
+        ) or None
+
+        result["actions"] = [
+            action
+            for component in components
+            for action in component["actions"]
+        ]
+
+        statuses = {c["status"] for c in components}
+
+        if statuses <= {"Ready", "Static Frontend"}:
+            result["status"] = "Ready"
+        elif statuses & {
+            "Runtime Missing",
+            "Environment Missing",
+            "Dependencies Missing",
+            "package.json Missing",
+        }:
+            result["status"] = "Setup Required"
+        else:
+            result["status"] = "Review Required"
+
         return result
+
     # -------------------------------------------------
     # Python
     # -------------------------------------------------
@@ -381,6 +469,7 @@ class EnvironmentManager:
                 "free_gb": None,
                 "error": str(error)
             }
+
     def check_installation_space(
         self,
         dependencies,

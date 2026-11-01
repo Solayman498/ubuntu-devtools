@@ -4,6 +4,7 @@ import sys
 
 from plugins.workspace_launcher.discovery import ProjectDiscovery
 from plugins.workspace_launcher.analyzer import DependencyAnalyzer
+from plugins.workspace_launcher.environment import EnvironmentManager
 
 
 class WorkspaceAnalyzer:
@@ -11,25 +12,43 @@ class WorkspaceAnalyzer:
     def __init__(self):
         self.discovery = ProjectDiscovery()
         self.analyzer = DependencyAnalyzer()
+        self.environment_manager = EnvironmentManager()
 
     def analyze_registered_projects(self, root_path="/home"):
-
         projects = self.discovery.discover_and_register(root_path)
 
         results = []
 
         for project in projects:
+            project_path = project["path"]
 
+            # Detect all technologies in the project.
+            technologies = self.discovery.detector.detect_technologies(
+                project_path
+            )
+
+            # Analyze dependencies.
             dependencies = self.analyzer.resolve_dependencies(
-                project["path"]
+                project_path
+            )
+
+            # Analyze runtime and environment readiness.
+            project_info = {
+                **project,
+                "technologies": technologies,
+            }
+            environment = self.environment_manager.analyze_environment(
+                project_info
             )
 
             results.append({
                 "name": project["name"],
-                "path": project["path"],
+                "path": project_path,
                 "type": project["type"],
                 "confidence": project["confidence"],
-                "dependencies": dependencies
+                "technologies": technologies,
+                "dependencies": dependencies,
+                "environment": environment,
             })
 
         return results

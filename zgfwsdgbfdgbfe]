@@ -1,0 +1,96 @@
+[1mdiff --git a/plugins/workspace_launcher/environment.py b/plugins/workspace_launcher/environment.py[m
+[1mindex 05882a9..c9e0245 100644[m
+[1m--- a/plugins/workspace_launcher/environment.py[m
+[1m+++ b/plugins/workspace_launcher/environment.py[m
+[36m@@ -16,6 +16,7 @@[m [mclass EnvironmentManager:[m
+             "project": project["name"],[m
+             "path": str(project_path),[m
+             "type": project["type"],[m
+[32m+[m[32m            "technologies": project.get("technologies", []),[m
+             "runtime": None,[m
+             "runtime_version": None,[m
+             "environment_exists": False,[m
+[36m@@ -45,38 +46,47 @@[m [mclass EnvironmentManager:[m
+             else:[m
+                 result["disk_status"] = "Healthy"[m
+ [m
+[31m-        project_type = project["type"][m
+[31m-        if project_type == "Python":[m
+[31m-            return self._analyze_python([m
+[31m-                project_path,[m
+[31m-                result[m
+[31m-            )[m
+[31m-[m
+[31m-        if project_type in {[m
+[31m-            "Node.js",[m
+[31m-            "JavaScript",[m
+[31m-            "TypeScript"[m
+[31m-        }:[m
+[31m-            return self._analyze_node([m
+[31m-                project_path,[m
+[31m-                result[m
+[31m-            )[m
+[31m-[m
+[31m-        if project_type in {[m
+[31m-            "C#",[m
+[31m-            ".NET"[m
+[31m-        }:[m
+[31m-            return self._analyze_dotnet([m
+[31m-                project_path,[m
+[31m-                result[m
+[31m-            )[m
+[31m-[m
+[32m+[m[32m        # Analyze actual technologies, not broad project classification.[m
+[32m+[m[32m        technologies = project.get("technologies", [])[m
+[32m+[m[32m        project_type = project.get("type", "")[m
+[32m+[m[32m        if isinstance(technologies, str):[m
+[32m+[m[32m            technologies = [technologies][m
+[32m+[m[41m        [m
+[32m+[m[32m        # Backward compatibility with existing registry entries.[m
+[32m+[m[32m        if not technologies:[m
+[32m+[m[32m            type_mapping = {[m
+[32m+[m[32m                "Python": ["Python"],[m
+[32m+[m[32m                "Node.js": ["JavaScript"],[m
+[32m+[m[32m                "JavaScript": ["JavaScript"],[m
+[32m+[m[32m                "TypeScript": ["TypeScript"],[m
+[32m+[m[32m                "C#": ["C#/.NET"],[m
+[32m+[m[32m                ".NET": ["C#/.NET"],[m
+[32m+[m[32m                "C# / .NET": ["C#/.NET"],[m
+[32m+[m[32m            }[m
+[32m+[m[32m            technologies = type_mapping.get(project_type, [])[m
+[32m+[m[41m        [m
+[32m+[m[32m        normalized = {[m
+[32m+[m[32m            technology.strip().lower()[m
+[32m+[m[32m            for technology in technologies[m
+[32m+[m[32m            if isinstance(technology, str)[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+[32m+[m[32m        if "python" in normalized:[m
+[32m+[m[32m            return self._analyze_python(project_path, result)[m
+[32m+[m[41m            [m
+[32m+[m[32m        if normalized & {"javascript", "typescript", "node.js"}:[m
+[32m+[m[32m            return self._analyze_node(project_path, result)[m
+[32m+[m[41m            [m
+[32m+[m[32m        if normalized & {"c#/.net", "c#", ".net"}:[m
+[32m+[m[32m            return self._analyze_dotnet(project_path, result)[m
+[32m+[m[41m            [m
+         result["status"] = "Runtime Detection Required"[m
+         result["actions"].append([m
+[31m-            "Runtime analysis not implemented yet"[m
+[32m+[m[32m            "Runtime analysis for detected technologies is not implemented yet"[m
+         )[m
+[31m-[m
+[32m+[m[32m        result["technologies"] = technologies[m
+         return result[m
+[32m+[m
+     # -------------------------------------------------[m
+     # Python[m
+     # -------------------------------------------------[m
+[36m@@ -381,6 +391,7 @@[m [mclass EnvironmentManager:[m
+                 "free_gb": None,[m
+                 "error": str(error)[m
+             }[m
+[32m+[m
+     def check_installation_space([m
+         self,[m
+         dependencies,[m

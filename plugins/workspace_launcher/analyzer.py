@@ -1,20 +1,40 @@
 from pathlib import Path
 import ast
+import json
 import re
 import sys
+
+
+from plugins.workspace_launcher.environment_checker import EnvironmentChecker
 from plugins.workspace_launcher.dependency_classifier import DependencyClassifier
 from plugins.workspace_launcher.adapters import get_adapters
 
 
 class DependencyAnalyzer:
+    """
+    Generic dependency analyzer for Python, Node.js, JavaScript/TypeScript,
+    and C#/.NET projects.
+
+    Responsibilities:
+    - Discover project files while skipping generated directories.
+    - Analyze supported dependency manifests.
+    - Extract imports from source files.
+    - Classify dependencies without installing anything.
+    - Preserve manifest versions and source locations.
+    - Flag uncertain package mappings for review.
+    """
 
     def __init__(self):
         self.name = "Dependency Analyzer"
+
         self.classifier = DependencyClassifier()
         self.adapters = get_adapters()
+        self.environment_checker = EnvironmentChecker()
 
         self.skip_directories = {
             ".git",
+            ".hg",
+            ".svn",
             ".vscode",
             ".idea",
             ".cache",
@@ -29,14 +49,28 @@ class DependencyAnalyzer:
             "target",
             "bin",
             "obj",
+            ".next",
+            ".nuxt",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            "coverage",
+            ".venv.backup",
+            "models",
         }
 
         self.source_extensions = {
             ".py": "Python",
+            ".pyw": "Python",
             ".js": "JavaScript",
             ".jsx": "JavaScript",
+            ".mjs": "JavaScript",
+            ".cjs": "JavaScript",
             ".ts": "TypeScript",
             ".tsx": "TypeScript",
+            ".mts": "TypeScript",
+            ".cts": "TypeScript",
+            ".cs": "C#",
             ".java": "Java",
             ".c": "C",
             ".h": "C",
@@ -44,7 +78,8 @@ class DependencyAnalyzer:
             ".cc": "C++",
             ".cxx": "C++",
             ".hpp": "C++",
-            ".cs": "C#",
+            ".hh": "C++",
+            ".hxx": "C++",
             ".php": "PHP",
             ".rs": "Rust",
             ".go": "Go",
@@ -53,10 +88,23 @@ class DependencyAnalyzer:
         }
 
         self.dependency_files = {
+            # Python
             "requirements.txt",
+            "requirements-dev.txt",
             "pyproject.toml",
             "Pipfile",
+            "setup.py",
+            "setup.cfg",
+
+            # Node.js
             "package.json",
+
+            # C#/.NET
+            "Directory.Build.props",
+            "Directory.Build.targets",
+            "Directory.Packages.props",
+
+            # Other ecosystems
             "composer.json",
             "pom.xml",
             "build.gradle",
@@ -69,742 +117,1133 @@ class DependencyAnalyzer:
             "Makefile",
         }
 
-    # --------------------------------------------------
-    # Main analyzer
-    # --------------------------------------------------
+        # Python import name -> PyPI distribution name
+        self.python_distribution_map = {
+            "PIL": "Pillow",
+            "cv2": "opencv-python",
+            "sklearn": "scikit-learn",
+            "yaml": "PyYAML",
+            "bs4": "beautifulsoup4",
+            "dotenv": "python-dotenv",
+            "Crypto": "pycryptodome",
+            "jwt": "PyJWT",
+            "magic": "python-magic",
+            "serial": "pyserial",
+            "dateutil": "python-dateutil",
+            "googleapiclient": "google-api-python-client",
+            "grpc": "grpcio",
+        }
+
+        # Built-in Node.js modules
+        self.node_builtins = {
+            "assert",
+            "async_hooks",
+            "buffer",
+            "child_process",
+            "cluster",
+            "console",
+            "constants",
+            "crypto",
+            "dgram",
+            "diagnostics_channel",
+            "dns",
+            "domain",
+            "events",
+            "fs",
+            "http",
+            "http2",
+            "https",
+            "module",
+            "net",
+            "os",
+            "path",
+            "path/posix",
+            "path/win32",
+            "perf_hooks",
+            "process",
+            "punycode",
+            "querystring",
+            "readline",
+            "repl",
+            "stream",
+            "stream/consumers",
+            "stream/promises",
+            "stream/web",
+            "string_decoder",
+            "sys",
+            "timers",
+            "timers/promises",
+            "tls",
+            "trace_events",
+            "tty",
+            "url",
+            "util",
+            "util/types",
+            "v8",
+            "vm",
+            "wasi",
+            "worker_threads",
+            "zlib",
+            "test",
+            "inspector",
+            "sqlite",
+        }
+
+    # ---------------------------------------------------------
+    # Public API
+    # ---------------------------------------------------------
 
     def analyze(self, project_path):
+        """
+        Scan a project and return its source files, manifests,
+        extracted imports, and manifest analysis.
 
-        project = Path(project_path)
+        This method does not install or modify anything.
+        """
+        project = Path(project_path).expanduser().resolve()
 
-        if not project.exists() or not project.is_dir():
+        if not project.exists():
             return {
-                "status": "Error",
+                "status": "error",
+                "message": f"Project path does not exist: {project}",
+                "project_path": str(project),
                 "dependency_files": [],
                 "source_files": [],
                 "languages": {},
-                "imports": {}
+                "imports": {},
+                "manifest_analysis": [],
             }
 
-        files = self._discover_files(project)
+        if not project.is_dir():
+            return {
+                "status": "error",
+                "message": f"Project path is not a directory: {project}",
+                "project_path": str(project),
+                "dependency_files": [],
+                "source_files": [],
+                "languages": {},
+                "imports": {},
+                "manifest_analysis": [],
+            }
+
+        discovered_files = self._discover_files(project)
 
         dependency_files = []
         source_files = []
         languages = {}
         imports = {}
 
-        for file in files:
+        for file_path in discovered_files:
+            # Manifest files should not be treated as source code.
+            if self._is_dependency_file(file_path):
+                dependency_files.append(file_path)
+                continue
 
-            if (
-                file.name in self.dependency_files
-                or any(
-                    adapter.can_handle(file)
-                    for adapter in self.adapters
-                )
-            ):
-                dependency_files.append(str(file))
+            language = self.source_extensions.get(
+                file_path.suffix.lower()
+            )
 
-            elif file.suffix.lower() in self.source_extensions:
+            if not language:
+                continue
 
-                language = self.source_extensions[
-                    file.suffix.lower()
-                ]
+            source_files.append(file_path)
 
-                source_files.append(str(file))
+            languages.setdefault(language, 0)
+            languages[language] += 1
 
-                languages.setdefault(
-                    language,
-                    []
-                ).append(str(file))
+            extracted = self.extract_imports(file_path, language)
 
-                detected_imports = self.extract_imports(
-                    file
-                )
+            if extracted:
+                imports[str(file_path)] = extracted
 
-                if detected_imports:
-                    imports[str(file)] = detected_imports
-
-        manifest_analysis = self.analyze_manifests(
-            dependency_files
-        )
+        manifest_analysis = self.analyze_manifests(dependency_files)
 
         return {
-            "status": "Analyzed",
-            "dependency_files": dependency_files,
-            "source_files": source_files,
+            "status": "success",
+            "project_path": str(project),
+            "dependency_files": [
+                str(path) for path in dependency_files
+            ],
+            "source_files": [
+                str(path) for path in source_files
+            ],
             "languages": languages,
             "imports": imports,
-            "manifest_analysis": manifest_analysis
+            "manifest_analysis": manifest_analysis,
         }
 
-    # --------------------------------------------------
-    # File discovery
-    # --------------------------------------------------
+    def resolve_dependencies(self, project_path, analysis=None):
+        """
+        Combine manifest declarations and source imports.
 
-    def _discover_files(self, project):
+        Returns dependency records suitable for a review/install-planning
+        stage. This method does not install packages.
 
-        discovered_files = []
+        Important:
+        - An import is not automatically proof of an installable package.
+        - Unknown mappings are marked needs_review.
+        - Manifest version constraints are preserved when available.
+        """
+        if analysis is None:
+            analysis = self.analyze(project_path)
 
-        self._scan_directory(
-            project,
-            discovered_files
+        if analysis["status"] != "success":
+            return []
+
+        dependencies = {}
+
+        manifest_records = analysis["manifest_analysis"]
+
+        # Keep declared dependencies grouped by ecosystem.
+        declared_by_ecosystem = {}
+
+        for manifest in manifest_records:
+            ecosystem = self._canonical_ecosystem(
+                manifest.get("ecosystem")
+            )
+
+            declared_by_ecosystem.setdefault(ecosystem, [])
+
+            for item in manifest.get("external", []):
+                if not isinstance(item, dict):
+                    continue
+
+                name = item.get("name")
+
+                if not name:
+                    continue
+
+                version = item.get("version")
+                package_name = str(name).strip()
+
+                key = self._dependency_key(
+                    ecosystem,
+                    package_name,
+                )
+
+                if key not in dependencies:
+                    dependencies[key] = {
+                        "name": package_name,
+                        "ecosystem": ecosystem,
+                        "version": version,
+                        "source": [],
+                        "classification": "declared_external",
+                        "needs_review": False,
+                        "review_reason": None,
+                    }
+
+                elif (
+                    version
+                    and not dependencies[key].get("version")
+                ):
+                    dependencies[key]["version"] = version
+
+                manifest_file = manifest.get("file")
+
+                if manifest_file:
+                    self._append_unique(
+                        dependencies[key]["source"],
+                        manifest_file,
+                    )
+
+                declared_by_ecosystem[ecosystem].append({
+                    "name": package_name,
+                    "version": version,
+                    "key": key,
+                })
+
+        # Process imports independently of whether a manifest exists.
+        # This prevents undeclared source dependencies from being hidden.
+        for file_path, imported_names in analysis["imports"].items():
+            path = Path(file_path)
+
+            language = self.source_extensions.get(
+                path.suffix.lower()
+            )
+
+            if not language:
+                continue
+
+            ecosystem = self._canonical_ecosystem(language)
+
+            declarations = declared_by_ecosystem.get(
+                ecosystem,
+                [],
+            )
+
+            for import_name in imported_names:
+                if not import_name:
+                    continue
+
+                resolution = self._resolve_import(
+                    project_path=Path(analysis["project_path"]),
+                    import_name=import_name,
+                    language=language,
+                    declarations=declarations,
+                )
+
+                # Built-ins and local imports are not external packages.
+                if resolution["classification"] in {
+                    "built_in",
+                    "local",
+                }:
+                    continue
+
+                package_name = resolution.get("name")
+
+                if not package_name:
+                    continue
+
+                key = self._dependency_key(
+                    ecosystem,
+                    package_name,
+                )
+
+                if key in dependencies:
+                    self._append_unique(
+                        dependencies[key]["source"],
+                        file_path,
+                    )
+
+                    # A declaration found in a manifest takes precedence.
+                    continue
+
+                classification = resolution["classification"]
+
+                dependencies[key] = {
+                    "name": package_name,
+                    "ecosystem": ecosystem,
+                    "version": resolution.get("version"),
+                    "source": [file_path],
+                    "classification": classification,
+                    "needs_review": resolution.get(
+                        "needs_review",
+                        False,
+                    ),
+                    "review_reason": resolution.get(
+                        "review_reason"
+                    ),
+                }
+
+        return sorted(
+            dependencies.values(),
+            key=lambda item: (
+                item.get("ecosystem") or "",
+                item.get("name") or "",
+            ),
         )
 
-        return discovered_files
+    # ---------------------------------------------------------
+    # File discovery
+    # ---------------------------------------------------------
 
-    def _scan_directory(
-        self,
-        directory,
-        discovered_files
-    ):
+    def _discover_files(self, project):
+        files = []
+        self._scan_directory(project, files)
+        return sorted(files)
 
+    def _scan_directory(self, directory, results):
         try:
-            children = directory.iterdir()
+            entries = list(directory.iterdir())
         except (PermissionError, OSError):
             return
 
-        for child in children:
-
-            if child.is_symlink():
-                continue
-
-            if child.is_dir():
-
-                if child.name in self.skip_directories:
+        for entry in entries:
+            try:
+                if entry.is_symlink():
                     continue
 
-                self._scan_directory(
-                    child,
-                    discovered_files
-                )
+                if entry.is_dir():
+                    if entry.name in self.skip_directories:
+                        continue
 
-            elif child.is_file():
+                    self._scan_directory(entry, results)
 
-                discovered_files.append(child)
+                elif entry.is_file():
+                    results.append(entry)
 
-    # --------------------------------------------------
-    # Language dispatcher
-    # --------------------------------------------------
+            except (PermissionError, OSError):
+                continue
 
-    def extract_imports(self, file_path):
+    def _is_dependency_file(self, file_path):
+        if file_path.name in self.dependency_files:
+            return True
 
-        path = Path(file_path)
-        extension = path.suffix.lower()
+        # Let the registered adapters identify supported manifests,
+        # including .csproj, .fsproj, .sln, .slnx and similar files.
+        for adapter in self.adapters:
+            try:
+                if adapter.can_handle(file_path):
+                    return True
+            except Exception:
+                continue
 
-        if extension == ".py":
-            return self.extract_python_imports(file_path)
+        return False
 
-        if extension in {".js", ".jsx", ".ts", ".tsx"}:
-            return self.extract_javascript_imports(file_path)
+    # ---------------------------------------------------------
+    # Manifest analysis
+    # ---------------------------------------------------------
 
-        if extension == ".java":
-            return self.extract_java_imports(file_path)
+    def analyze_manifests(self, dependency_files):
+        results = []
 
-        if extension in {
-            ".c",
-            ".h",
-            ".cpp",
-            ".cc",
-            ".cxx",
-            ".hpp"
-        }:
-            return self.extract_cpp_imports(file_path)
+        for file_path in dependency_files:
+            for adapter in self.adapters:
+                try:
+                    if adapter.can_handle(file_path):
+                        result = adapter.analyze_manifest(file_path)
 
-        if extension == ".cs":
-            return self.extract_csharp_imports(file_path)
+                        if not isinstance(result, dict):
+                            break
 
-        if extension == ".php":
-            return self.extract_php_imports(file_path)
+                        result.setdefault(
+                            "file",
+                            str(file_path),
+                        )
 
-        if extension == ".rs":
-            return self.extract_rust_imports(file_path)
+                        result.setdefault(
+                            "external",
+                            [],
+                        )
 
-        if extension == ".go":
-            return self.extract_go_imports(file_path)
+                        result.setdefault(
+                            "local",
+                            [],
+                        )
 
-        if extension == ".rb":
-            return self.extract_ruby_imports(file_path)
+                        results.append(result)
+                        break
 
-        if extension == ".dart":
-            return self.extract_dart_imports(file_path)
+                except Exception as exc:
+                    results.append({
+                        "ecosystem": "Unknown",
+                        "file": str(file_path),
+                        "runtime": None,
+                        "sdk": None,
+                        "external": [],
+                        "local": [],
+                        "errors": [
+                            f"Manifest analysis failed: {exc}"
+                        ],
+                    })
+
+                    break
+
+        return results
+
+    # ---------------------------------------------------------
+    # Import extraction
+    # ---------------------------------------------------------
+
+    def extract_imports(self, file_path, language):
+        text = self._read_text(file_path)
+
+        if text is None:
+            return []
+
+        try:
+            if language == "Python":
+                return self._extract_python_imports(text)
+
+            if language in {"JavaScript", "TypeScript"}:
+                return self._extract_javascript_imports(text)
+
+            if language == "C#":
+                return self._extract_csharp_imports(text)
+
+            if language == "Java":
+                return self._extract_java_imports(text)
+
+            if language in {"C", "C++"}:
+                return self._extract_cpp_imports(text)
+
+            if language == "PHP":
+                return self._extract_php_imports(text)
+
+            if language == "Rust":
+                return self._extract_rust_imports(text)
+
+            if language == "Go":
+                return self._extract_go_imports(text)
+
+            if language == "Ruby":
+                return self._extract_ruby_imports(text)
+
+            if language == "Dart":
+                return self._extract_dart_imports(text)
+
+        except Exception:
+            # A single malformed source file should not abort the scan.
+            return []
 
         return []
 
-    # --------------------------------------------------
-    # Python
-    # --------------------------------------------------
-
-    def extract_python_imports(self, file_path):
-
+    def _extract_python_imports(self, text):
         imports = set()
 
         try:
-            with open(
-                file_path,
-                "r",
-                encoding="utf-8"
-            ) as file:
-
-                source = file.read()
-
-            tree = ast.parse(source)
-
-            for node in ast.walk(tree):
-
-                if isinstance(node, ast.Import):
-
-                    for alias in node.names:
-                        imports.add(
-                            alias.name.split(".")[0]
-                        )
-
-                elif isinstance(node, ast.ImportFrom):
-
-                    if node.module:
-                        imports.add(
-                            node.module.split(".")[0]
-                        )
-
-        except (
-            OSError,
-            UnicodeDecodeError,
-            SyntaxError
-        ):
+            tree = ast.parse(text)
+        except SyntaxError:
             return []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+
+                    if root:
+                        imports.add(root)
+
+            elif isinstance(node, ast.ImportFrom):
+                # Relative imports are local project imports.
+                if node.level > 0:
+                    continue
+
+                if node.module:
+                    root = node.module.split(".")[0]
+
+                    if root:
+                        imports.add(root)
 
         return sorted(imports)
 
-    # --------------------------------------------------
-    # JavaScript / TypeScript
-    # --------------------------------------------------
-
-    def extract_javascript_imports(self, file_path):
-
+    def _extract_javascript_imports(self, text):
         imports = set()
 
-        content = self._read_text(file_path)
-
-        if content is None:
-            return []
+        # Remove comments before matching to reduce false positives.
+        cleaned = self._remove_js_comments(text)
 
         patterns = [
-            r'import\s+(?:.*?\s+from\s+)?[\'"]([^\'"]+)[\'"]',
-            r'require\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)',
-            r'import\s*\(\s*[\'"]([^\'"]+)[\'"]\s*\)'
+            r"""(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]""",
+            r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""",
+            r"""import\s*\(\s*['"]([^'"]+)['"]\s*\)""",
         ]
 
         for pattern in patterns:
+            for match in re.findall(pattern, cleaned):
+                package = self._normalise_js_import(match)
 
-            matches = re.findall(
-                pattern,
-                content
-            )
-
-            for match in matches:
-
-                if match.startswith("."):
-                    continue
-
-                package = match.split("/")[0]
-
-                if match.startswith("@"):
-                    parts = match.split("/")
-
-                    if len(parts) >= 2:
-                        package = (
-                            parts[0] + "/" + parts[1]
-                        )
-
-                imports.add(package)
+                if package:
+                    imports.add(package)
 
         return sorted(imports)
 
-    # --------------------------------------------------
-    # Java
-    # --------------------------------------------------
+    def _remove_js_comments(self, text):
+        """
+        Remove common JavaScript/TypeScript comments.
 
-    def extract_java_imports(self, file_path):
-
-        imports = set()
-
-        content = self._read_text(file_path)
-
-        if content is None:
-            return []
-
-        matches = re.findall(
-            r'^\s*import\s+(?:static\s+)?([a-zA-Z0-9_.]+)',
-            content,
-            re.MULTILINE
+        This intentionally avoids a full parser; imports inside unusual
+        strings or template literals can still require manual review.
+        """
+        text = re.sub(
+            r"/\*.*?\*/",
+            "",
+            text,
+            flags=re.DOTALL,
         )
 
-        for match in matches:
-            imports.add(
-                match.split(".")[0]
-            )
+        text = re.sub(
+            r"^\s*//.*$",
+            "",
+            text,
+            flags=re.MULTILINE,
+        )
+
+        return text
+
+    def _normalise_js_import(self, module_name):
+        module_name = module_name.strip()
+
+        if not module_name:
+            return None
+
+        # Relative imports are local files.
+        if module_name.startswith((".", "/", "\\")):
+            return None
+
+        # URLs are not npm package dependencies.
+        if module_name.startswith(("http://", "https://", "data:")):
+            return None
+
+        # node:fs and similar imports refer to Node.js built-ins.
+        if module_name.startswith("node:"):
+            return module_name
+
+        # Scoped package: @scope/package/subpath -> @scope/package
+        if module_name.startswith("@"):
+            parts = module_name.split("/")
+
+            if len(parts) >= 2:
+                return "/".join(parts[:2])
+
+            return module_name
+
+        # Normal package: package/subpath -> package
+        return module_name.split("/")[0]
+
+    def _extract_csharp_imports(self, text):
+        imports = set()
+
+        # Supports:
+        # using System;
+        # global using Microsoft.Extensions.Logging;
+        # using static Some.Namespace.SomeClass;
+        # using Alias = Some.Namespace;
+        pattern = (
+            r"^\s*(?:global\s+)?using\s+"
+            r"(?:static\s+)?"
+            r"(?:[A-Za-z_]\w*\s*=\s*)?"
+            r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;"
+        )
+
+        for match in re.findall(
+            pattern,
+            text,
+            flags=re.MULTILINE,
+        ):
+            imports.add(match.strip())
 
         return sorted(imports)
 
-    # --------------------------------------------------
-    # C / C++
-    # --------------------------------------------------
-
-    def extract_cpp_imports(self, file_path):
-
+    def _extract_java_imports(self, text):
         imports = set()
 
-        content = self._read_text(file_path)
-
-        if content is None:
-            return []
-
-        matches = re.findall(
-            r'#include\s*[<"]([^>"]+)[>"]',
-            content
+        pattern = (
+            r"^\s*import\s+"
+            r"(?:static\s+)?"
+            r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)"
+            r"(?:\.\*)?\s*;"
         )
 
-        for match in matches:
+        for match in re.findall(
+            pattern,
+            text,
+            flags=re.MULTILINE,
+        ):
+            parts = match.split(".")
 
-            # Local project header
-            if "/" in match:
-                imports.add(match)
-
-            else:
-                imports.add(match)
+            if parts:
+                imports.add(".".join(parts[:2]))
 
         return sorted(imports)
 
-    # --------------------------------------------------
-    # C#
-    # --------------------------------------------------
-
-    def extract_csharp_imports(self, file_path):
-
+    def _extract_cpp_imports(self, text):
         imports = set()
 
-        content = self._read_text(file_path)
-
-        if content is None:
-            return []
-
-        matches = re.findall(
-            r'^\s*using\s+([a-zA-Z0-9_.]+)',
-            content,
-            re.MULTILINE
-        )
-
-        for match in matches:
-            imports.add(match.split(".")[0])
+        for match in re.findall(
+            r'^\s*#\s*include\s*[<"]([^>"]+)[>"]',
+            text,
+            flags=re.MULTILINE,
+        ):
+            imports.add(match.strip())
 
         return sorted(imports)
 
-    # --------------------------------------------------
-    # PHP
-    # --------------------------------------------------
-
-    def extract_php_imports(self, file_path):
-
+    def _extract_php_imports(self, text):
         imports = set()
 
-        content = self._read_text(file_path)
+        for match in re.findall(
+            r"^\s*use\s+([A-Za-z_\\][A-Za-z0-9_\\]*)",
+            text,
+            flags=re.MULTILINE,
+        ):
+            imports.add(match.lstrip("\\"))
 
-        if content is None:
-            return []
+        return sorted(imports)
 
-        use_matches = re.findall(
-            r'^\s*use\s+([^;]+);',
-            content,
-            re.MULTILINE
-        )
+    def _extract_rust_imports(self, text):
+        imports = set()
 
-        require_matches = re.findall(
-            r'(?:require|require_once|include|include_once)'
-            r'\s*[\'"]([^\'"]+)[\'"]',
-            content
-        )
-
-        for match in use_matches:
-            imports.add(
-                match.strip().split("\\")[0]
-            )
-
-        for match in require_matches:
+        for match in re.findall(
+            r"^\s*use\s+([A-Za-z_][A-Za-z0-9_]*)",
+            text,
+            flags=re.MULTILINE,
+        ):
             imports.add(match)
 
         return sorted(imports)
 
-    # --------------------------------------------------
-    # Rust
-    # --------------------------------------------------
-
-    def extract_rust_imports(self, file_path):
-
+    def _extract_go_imports(self, text):
         imports = set()
 
-        content = self._read_text(file_path)
+        # Handles both single imports and common import blocks.
+        pattern = r'"([^"]+)"'
 
-        if content is None:
-            return []
+        in_import_block = False
 
-        use_matches = re.findall(
-            r'^\s*use\s+([a-zA-Z0-9_]+)',
-            content,
-            re.MULTILINE
-        )
+        for line in text.splitlines():
+            stripped = line.strip()
 
-        extern_matches = re.findall(
-            r'^\s*extern\s+crate\s+([a-zA-Z0-9_]+)',
-            content,
-            re.MULTILINE
-        )
+            if stripped.startswith("import ("):
+                in_import_block = True
+                continue
 
-        imports.update(use_matches)
-        imports.update(extern_matches)
+            if in_import_block:
+                if stripped == ")":
+                    in_import_block = False
+                    continue
+
+                match = re.search(pattern, stripped)
+
+                if match:
+                    imports.add(match.group(1))
+
+                continue
+
+            if stripped.startswith("import "):
+                match = re.search(pattern, stripped)
+
+                if match:
+                    imports.add(match.group(1))
 
         return sorted(imports)
 
-    # --------------------------------------------------
-    # Go
-    # --------------------------------------------------
-
-    def extract_go_imports(self, file_path):
-
+    def _extract_ruby_imports(self, text):
         imports = set()
 
-        content = self._read_text(file_path)
+        for match in re.findall(
+            r"""^\s*require(?:_relative)?\s*['"]([^'"]+)['"]""",
+            text,
+            flags=re.MULTILINE,
+        ):
+            imports.add(match)
 
-        if content is None:
-            return []
+        return sorted(imports)
 
-        single_matches = re.findall(
-            r'import\s+"([^"]+)"',
-            content
-        )
+    def _extract_dart_imports(self, text):
+        imports = set()
 
-        block_matches = re.findall(
-            r'import\s*\((.*?)\)',
-            content,
-            re.DOTALL
-        )
+        for match in re.findall(
+            r"""^\s*import\s+['"]([^'"]+)['"]""",
+            text,
+            flags=re.MULTILINE,
+        ):
+            imports.add(match)
 
-        imports.update(single_matches)
+        return sorted(imports)
 
-        for block in block_matches:
+    # ---------------------------------------------------------
+    # Dependency resolution and classification
+    # ---------------------------------------------------------
 
-            paths = re.findall(
-                r'"([^"]+)"',
-                block
+    def _resolve_import(
+        self,
+        project_path,
+        import_name,
+        language,
+        declarations,
+    ):
+        """
+        Convert an import into a best-effort dependency record.
+
+        This function does not query package registries or install anything.
+        """
+        ecosystem = self._canonical_ecosystem(language)
+
+        # Python
+        if language == "Python":
+            # Standard-library modules
+            if import_name in sys.stdlib_module_names:
+                return {
+                    "name": import_name,
+                    "classification": "built_in",
+                }
+
+            # Convert Python import names to PyPI distribution names
+            distribution_name = self.python_distribution_map.get(
+                import_name,
+                import_name,
             )
 
-            imports.update(paths)
+            # Check whether the dependency is declared in a manifest
+            declared = self._find_declared_package(
+                distribution_name,
+                declarations,
+            )
 
-        return sorted(imports)
+            if declared:
+                return {
+                    "name": declared["name"],
+                    "version": declared.get("version"),
+                    "classification": "declared_external",
+                }
 
-    # --------------------------------------------------
-    # Ruby
-    # --------------------------------------------------
+            # Check whether this import belongs to the project itself
+            if self._is_local_python_import(
+                project_path,
+                import_name,
+            ):
+                return {
+                    "name": import_name,
+                    "classification": "local",
+                }
 
-    def extract_ruby_imports(self, file_path):
+            # Treat the remaining imports as external dependencies
+            known_mapping = import_name in self.python_distribution_map
 
-        imports = set()
-
-        content = self._read_text(file_path)
-
-        if content is None:
-            return []
-
-        matches = re.findall(
-            r'^\s*require\s+[\'"]([^\'"]+)[\'"]',
-            content,
-            re.MULTILINE
-        )
-
-        imports.update(matches)
-
-        return sorted(imports)
-
-    # --------------------------------------------------
-    # Dart
-    # --------------------------------------------------
-
-    def extract_dart_imports(self, file_path):
-
-        imports = set()
-
-        content = self._read_text(file_path)
-
-        if content is None:
-            return []
-
-        matches = re.findall(
-            r'^\s*(?:import|export)\s+[\'"]([^\'"]+)[\'"]',
-            content,
-            re.MULTILINE
-        )
-
-        for match in matches:
-
-            if match.startswith("dart:"):
-                imports.add(match)
-
-            elif match.startswith("package:"):
-
-                parts = match.split("/")
-
-                if len(parts) >= 2:
-                    imports.add(
-                        parts[1]
+            return {
+                "name": distribution_name,
+                "classification": "undeclared_external",
+                "needs_review": not known_mapping,
+                "review_reason": (
+                    None
+                    if known_mapping
+                    else (
+                        "Python import names do not always match PyPI "
+                        "distribution names. Verify the package mapping."
                     )
+                ),
+            }
 
-            elif not match.startswith("."):
-                imports.add(match)
+    # Keep your existing code for other languages below this point.
 
-        return sorted(imports)
+        # JavaScript and TypeScript
+        if language in {"JavaScript", "TypeScript"}:
+            module_name = self._normalise_js_import(import_name)
 
-    # --------------------------------------------------
-    # Utility
-    # --------------------------------------------------
+            if not module_name:
+                return {
+                    "name": import_name,
+                    "classification": "local",
+                }
 
-    def _read_text(self, file_path):
+            builtin_name = module_name.removeprefix("node:")
 
-        try:
-            with open(
-                file_path,
-                "r",
-                encoding="utf-8"
-            ) as file:
+            if (
+                import_name.startswith("node:")
+                or builtin_name in self.node_builtins
+            ):
+                return {
+                    "name": module_name,
+                    "classification": "built_in",
+                }
 
-                return file.read()
+            declared = self._find_declared_package(
+                module_name,
+                declarations,
+            )
 
-        except (
-            OSError,
-            UnicodeDecodeError
-        ):
-            return None
+            if declared:
+                return {
+                    "name": declared["name"],
+                    "version": declared.get("version"),
+                    "classification": "declared_external",
+                }
 
-    # --------------------------------------------------
-    # Python standard library separation
-    # --------------------------------------------------
+            classification = self._safe_classify(
+                project_path,
+                module_name,
+                language,
+                declarations,
+            )
 
-    def separate_python_dependencies(self, imports):
+            if classification == "local":
+                return {
+                    "name": module_name,
+                    "classification": "local",
+                }
 
-        built_in = []
-        external = []
+            return {
+                "name": module_name,
+                "classification": "undeclared_external",
+                "needs_review": True,
+                "review_reason": (
+                    "Verify that this import is an npm package and not "
+                    "an alias, generated module, or workspace dependency."
+                ),
+            }
 
-        for package in imports:
+        # C#/.NET
+        if language == "C#":
+            # Prefer matching a namespace to an actual declared NuGet
+            # package, rather than assuming namespace == package name.
+            declared = self._match_dotnet_namespace(
+                import_name,
+                declarations,
+            )
 
-            if package in sys.stdlib_module_names:
-                built_in.append(package)
+            if declared:
+                return {
+                    "name": declared["name"],
+                    "version": declared.get("version"),
+                    "classification": "declared_external",
+                }
 
-            else:
-                external.append(package)
+            classification = self._safe_classify(
+                project_path,
+                import_name,
+                language,
+                declarations,
+            )
+
+            if classification in {"built_in", "local"}:
+                return {
+                    "name": import_name,
+                    "classification": classification,
+                }
+
+            return {
+                "name": import_name,
+                "classification": "undeclared_external",
+                "needs_review": True,
+                "review_reason": (
+                    "A C# namespace is not necessarily a NuGet package "
+                    "name. Inspect project references and package metadata."
+                ),
+            }
+
+        # Other supported languages: classify conservatively.
+        classification = self._safe_classify(
+            project_path,
+            import_name,
+            language,
+            declarations,
+        )
+
+        if classification in {"built_in", "local"}:
+            return {
+                "name": import_name,
+                "classification": classification,
+            }
 
         return {
-            "built_in": sorted(built_in),
-            "external": sorted(external)
+            "name": import_name,
+            "classification": "undeclared_external",
+            "needs_review": True,
+            "review_reason": (
+                f"Automatic package-name resolution is not yet implemented "
+                f"for {language}. Verify the dependency before installation."
+            ),
         }
+
+    def _safe_classify(
+        self,
+        project_path,
+        import_name,
+        language,
+        declarations,
+    ):
+        """
+        Use the existing DependencyClassifier without allowing a classifier
+        error to abort the full scan.
+        """
+        try:
+            result = self.classifier.classify(
+                project_path,
+                import_name,
+                language,
+                {
+                    item["name"]
+                    for item in declarations
+                    if item.get("name")
+                },
+            )
+
+            if result:
+                return result
+
+        except Exception:
+            pass
+
+        return "undeclared_external"
     
-    def resolve_dependencies(self, project_path):
+
+    
+
+    def _match_dotnet_namespace(self, namespace, declarations):
+        """
+        Match a C# namespace to a declared NuGet package when evidence exists.
+
+        Example:
+            namespace: Google.Cloud.Firestore
+            declared package: Google.Cloud.Firestore
+
+        The match is based on existing manifest declarations, not a
+        hardcoded assumption that every namespace root is a package.
+        """
+        namespace = namespace.strip().strip(".")
+
+        if not namespace:
+            return None
+
+        matches = []
+
+        for declaration in declarations:
+            package_name = declaration.get("name", "").strip()
+
+            if not package_name:
+                continue
+
+            if (
+                namespace == package_name
+                or namespace.startswith(package_name + ".")
+                or package_name.startswith(namespace + ".")
+            ):
+                matches.append(declaration)
+
+        if not matches:
+            return None
+
+        # Prefer the most specific package-name match.
+        return max(
+            matches,
+            key=lambda item: len(item.get("name", "")),
+        )
+
+    def _find_declared_package(self, import_name, declarations):
+        """
+        Match an import to a declared package using normalized names.
+
+        This is a best-effort comparison. It does not guarantee that an
+        arbitrary import name maps to the same-named package.
+        """
+        target = self._normalise_package_name(import_name)
+
+        for declaration in declarations:
+            declared_name = declaration.get("name")
+
+            if not declared_name:
+                continue
+
+            if self._normalise_package_name(declared_name) == target:
+                return declaration
+
+        return None
+
+    # ---------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------
+
+    def _canonical_ecosystem(self, name):
+        """
+        Normalize source-language and manifest ecosystem labels.
+
+        Keep source language labels separate when calling the classifier.
+        """
+        mapping = {
+            "Python": "Python",
+            "JavaScript": "Node.js",
+            "TypeScript": "Node.js",
+            "Node.js": "Node.js",
+            "C#": ".NET",
+            ".NET": ".NET",
+            "Java": "Java",
+            "C": "C",
+            "C++": "C++",
+            "PHP": "PHP",
+            "Rust": "Rust",
+            "Go": "Go",
+            "Ruby": "Ruby",
+            "Dart": "Dart",
+        }
+
+        return mapping.get(name, name or "Unknown")
+
+    def _dependency_key(self, ecosystem, package_name):
+        normalized = self._normalise_package_name(package_name)
+
+        return f"{ecosystem.lower()}::{normalized}"
+
+    def _normalise_package_name(self, name):
+        """
+        Normalize names for comparison without changing the displayed name.
+        """
+        return re.sub(
+            r"[-_.]+",
+            "-",
+            str(name).strip().lower(),
+        )
+
+    def _append_unique(self, items, value):
+        if value and value not in items:
+            items.append(value)
+
+    def _read_text(self, file_path):
+        try:
+            return Path(file_path).read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except (OSError, PermissionError):
+            return None
+    
+
+
+    def analyze_and_verify(self, project_path):
+        """Analyze dependencies and verify the project environment."""
 
         analysis = self.analyze(project_path)
 
-        dependencies = {}
+        if analysis["status"] != "success":
+            return {
+                "status": "error",
+                "message": analysis.get(
+                    "message",
+                    "Project analysis failed."
+                ),
+                "analysis": analysis,
+            }
 
-        # Dependencies declared by project manifests
-                
-        declared_dependencies = set()
+        dependencies = self.resolve_dependencies(
+            project_path,
+            analysis=analysis,
+        )
 
-        for manifest in analysis["manifest_analysis"]:
+        verification = self.environment_checker.verify_dependencies(
+            project_path,
+            dependencies,
+        )
 
-            for dependency in manifest["external"]:
+        return {
+            "status": "success",
+            "project_path": analysis["project_path"],
+            "languages": analysis["languages"],
+            "dependency_files": analysis["dependency_files"],
+            "source_files": analysis["source_files"],
+            "dependencies": verification.get("dependencies", []),
+            "environment": verification.get("environment", {}),
+            "summary": verification.get("summary", {}),
+            "verification_status": verification.get("status"),
+            "verification_message": verification.get("message"),
+        }
 
-                name = dependency["name"]
 
-                declared_dependencies.add(name)
+    def _is_local_python_import(self, project_path, import_name):
+        """
+        Check whether a Python import belongs to the project itself.
+        """
+        project = Path(project_path).expanduser().resolve()
+        module_name = str(import_name).split(".")[0]
 
-                dependencies.setdefault(
-                    name,
-                    {
-                        "name": name,
-                        "ecosystem": manifest["ecosystem"],
-                        "version": dependency["version"],
-                        "source": [],
-                        "classification": "declared_external"
-                    }
-                )
+        if not module_name or not module_name.isidentifier():
+            return False
 
-                dependencies[name]["source"].append(
-                    manifest["file"]
-                )
+        search_dirs = {project}
 
-        # Dependencies discovered from source code
-        for file_path, imports in analysis["imports"].items():
+        # Find directories containing Python source files
+        for file_path in self._discover_files(project):
+            if file_path.suffix.lower() in {".py", ".pyw"}:
+                search_dirs.add(file_path.parent)
 
-            language = self.source_extensions.get(
-                Path(file_path).suffix.lower()
-            )
+        for directory in search_dirs:
+            # Example: backend/utils.py
+            module_file = directory / f"{module_name}.py"
 
-            for package in imports:
+            if module_file.is_file():
+                return True
 
-                if not package:
-                    continue
+            # Example: backend/utils/__init__.py
+            package_dir = directory / module_name
 
-                # Ignore URLs and invalid import tokens
-                if (
-                    package.startswith("http://")
-                    or package.startswith("https://")
-                    or package in {"http:", "https:"}
-                ):
-                    continue
-
-                if package in declared_dependencies:
-                    continue
-
-                classification = self.classifier.classify(
-                    project_path,
-                    package,
-                    language,
-                    declared_dependencies
-                )
-
-                if classification in {
-                    "built_in",
-                    "local"
-                }:
-                    continue
-
-                ecosystem_has_manifest = any(
-                    manifest["ecosystem"] == language
-                    and (
-                        manifest["external"]
-                        or manifest["local"]
-                    )
-                    for manifest in analysis["manifest_analysis"]
-                )
-
-                if ecosystem_has_manifest:
-                    continue
-
-                if package not in dependencies:
-
-                    dependencies[package] = {
-                        "name": package,
-                        "ecosystem": language,
-                        "source": [],
-                        "classification": classification
-                    }
-
-                dependencies[package]["source"].append(
-                    file_path
-                )
-
-        return list(dependencies.values())
-
-    def _read_manifest(self, file_path):
-
-        path = Path(file_path)
-
-        if path.name == "requirements.txt":
-            return self._parse_requirements(path)
-
-        if path.name == "package.json":
-            return self._parse_package_json(path)
-
-        return []
-
-    def _parse_requirements(self, path):
-
-        dependencies = []
-
-        content = self._read_text(path)
-
-        if content is None:
-            return dependencies
-
-        for line in content.splitlines():
-
-            line = line.strip()
-
-            if not line:
+            if not package_dir.is_dir():
                 continue
 
-            if line.startswith("#"):
-                continue
+            if (package_dir / "__init__.py").is_file():
+                return True
 
-            # Remove common version operators
-            match = re.match(
-                r"^([A-Za-z0-9_.-]+)",
-                line
-            )
+            # Support namespace packages without __init__.py
+            for child in self._discover_files(package_dir):
+                if child.suffix.lower() in {".py", ".pyw"}:
+                    return True
 
-            if not match:
-                continue
-
-            package = match.group(1)
-
-            dependencies.append({
-                "name": package,
-                "ecosystem": "Python",
-                "source": "requirements.txt"
-            })
-
-        return dependencies
-
-    def _parse_package_json(self, path):
-
-        import json
-
-        dependencies = []
-
-        content = self._read_text(path)
-
-        if content is None:
-            return dependencies
-
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            return dependencies
-
-        package_sections = [
-            "dependencies",
-            "devDependencies"
-        ]
-
-        for section in package_sections:
-
-            packages = data.get(
-                section,
-                {}
-            )
-
-            for package in packages:
-
-                dependencies.append({
-                    "name": package,
-                    "ecosystem": "Node.js",
-                    "source": "package.json"
-                })
-        return dependencies
-    
-    def analyze_manifests(self, dependency_files):
-
-        results = []
-
-        for file_path in dependency_files:
-
-            for adapter in self.adapters:
-
-                if not adapter.can_handle(file_path):
-                    continue
-
-                result = adapter.analyze_manifest(
-                    file_path
-                )
-
-                results.append(result)
-
-                break
-
-        return results
-        
+        return False

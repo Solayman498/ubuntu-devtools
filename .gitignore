@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# Build and distribution
+build/
+dist/
+
+# PyInstaller
+*.spec.bak
+
+# IDE
+.vscode/
+.idea/
+
+# Test and cache
+.pytest_cache/
+.mypy_cache/
+.coverage

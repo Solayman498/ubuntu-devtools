@@ -140,6 +140,129 @@ class ProjectDetector:
 
         return self._unknown()
 
+    def detect_technologies(self, project_path):
+        """Detect project technologies using manifests and source files."""
+        import os
+
+        path = Path(project_path)
+
+        if not path.is_dir() or path.is_symlink():
+            return []
+
+        skip_directories = {
+            ".git",
+            ".venv",
+            "venv",
+            "env",
+            ".env",
+            "node_modules",
+            "__pycache__",
+            ".vscode",
+            ".idea",
+            ".cache",
+            "build",
+            "dist",
+            "target",
+            "bin",
+            "obj",
+            "vendor",
+        }
+
+        markers = {
+            "Python": self.PYTHON_MARKERS,
+            "Node.js": {"package.json"},
+            "Java": {
+                "pom.xml",
+                "build.gradle",
+                "build.gradle.kts",
+            },
+            "PHP": {"composer.json"},
+            "Rust": {"Cargo.toml"},
+            "Go": {"go.mod", "go.work"},
+            "Ruby": {"Gemfile"},
+            "Dart/Flutter": {"pubspec.yaml"},
+            "Docker": {
+                "Dockerfile",
+                "docker-compose.yml",
+                "docker-compose.yaml",
+                "compose.yaml",
+                "compose.yml",
+            },
+            "Swift": {"Package.swift"},
+            "C/C++": {"CMakeLists.txt", "Makefile"},
+        }
+
+        source_extensions = {
+            ".py": "Python",
+            ".js": "JavaScript",
+            ".jsx": "JavaScript",
+            ".mjs": "JavaScript",
+            ".cjs": "JavaScript",
+            ".ts": "TypeScript",
+            ".tsx": "TypeScript",
+            ".java": "Java",
+            ".kt": "Kotlin",
+            ".cs": "C#/.NET",
+            ".fs": "C#/.NET",
+            ".vb": "C#/.NET",
+            ".php": "PHP",
+            ".rs": "Rust",
+            ".go": "Go",
+            ".rb": "Ruby",
+            ".dart": "Dart/Flutter",
+            ".swift": "Swift",
+            ".c": "C/C++",
+            ".h": "C/C++",
+            ".cc": "C/C++",
+            ".cpp": "C/C++",
+            ".cxx": "C/C++",
+            ".hpp": "C/C++",
+            ".html": "Web Frontend",
+            ".htm": "Web Frontend",
+            ".css": "Web Frontend",
+        }
+
+        technologies = set()
+
+        try:
+            for root, dirs, files in os.walk(
+                path,
+                followlinks=False,
+            ):
+                dirs[:] = [
+                    directory
+                    for directory in dirs
+                    if directory not in skip_directories
+                ]
+
+                filenames = set(files)
+
+                # Strong evidence: project manifests.
+                for technology, technology_markers in markers.items():
+                    if filenames.intersection(technology_markers):
+                        technologies.add(technology)
+
+                # .NET project and solution files.
+                if any(
+                    Path(filename).suffix.lower()
+                    in self.PROJECT_EXTENSIONS
+                    for filename in files
+                ):
+                    technologies.add("C#/.NET")
+
+                # Supporting evidence: source files.
+                for filename in files:
+                    extension = Path(filename).suffix.lower()
+                    technology = source_extensions.get(extension)
+
+                    if technology:
+                        technologies.add(technology)
+
+        except OSError:
+            return sorted(technologies)
+
+        return sorted(technologies)
+
     def _identify_type(self, files, directories):
         if "frontend" in directories and "backend" in directories:
             return "Full-Stack"
