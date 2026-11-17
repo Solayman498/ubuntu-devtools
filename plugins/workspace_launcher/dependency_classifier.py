@@ -209,7 +209,8 @@ class DependencyClassifier:
 
         # C# built-in namespaces
         if ecosystem == "C#":
-            return dependency_name == "System"
+            root = dependency_name.split(".")[0]
+            return root == "System"
 
         # Dart built-in libraries
         if ecosystem == "Dart":

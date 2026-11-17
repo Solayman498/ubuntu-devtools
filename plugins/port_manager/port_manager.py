@@ -64,14 +64,44 @@ class PortManager:
         try:
             process = psutil.Process(pid)
 
+            process_state = process.status()
+
+            connections = process.net_connections(kind="inet")
+
+            listening_ports = []
+
+            for connection in connections:
+                if connection.status == "LISTEN":
+                    listening_ports.append({
+                        "port": connection.laddr.port,
+                        "address": connection.laddr.ip,
+                        "protocol": (
+                            "TCP"
+                            if connection.type == socket.SOCK_STREAM
+                            else "UDP"
+                        )
+                    })
+
+            port_status = (
+                "LISTEN"
+                if listening_ports
+                else "NO LISTENING PORT"
+            )
+
             return {
                 "pid": process.pid,
                 "name": process.name(),
-                "status": process.status(),
+                "status": port_status,
+                "process_state": process_state,
                 "username": process.username(),
+                "listening_ports": listening_ports
             }
 
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            psutil.ZombieProcess
+        ):
             return None
         
     def terminate_process(self, port_number, pid):
