@@ -24,7 +24,7 @@ from plugins.port_manager import PortManager
 from core.project_registry import ProjectRegistry
 from plugins.workspace_launcher.discovery import ProjectDiscovery
 from plugins.project_cache_cleaner import ProjectCacheCleaner
-
+from plugins.docker_manager import DockerManager
 try:
     from plugins.workspace_launcher.analyzer import DependencyAnalyzer
 except Exception:
@@ -264,6 +264,7 @@ class MainWindow(QMainWindow):
         self.port_manager = PortManager()
         self.project_registry = ProjectRegistry()
         self.cache_cleaner = ProjectCacheCleaner()
+        self.docker_manager = DockerManager()
         self.cache_project_path = None
         self.cache_scan_results = []
 
@@ -299,13 +300,16 @@ class MainWindow(QMainWindow):
         self.workspace_page = self.create_workspace_page()
         self.port_page = self.create_port_page()
         self.cache_cleaner_page = self.create_cache_cleaner_page()
+        self.docker_page = self.create_docker_page()
         for page in (
             self.dashboard_page,
             self.projects_page,
             self.workspace_page,
             self.port_page,
             self.cache_cleaner_page,
+            self.docker_page,
         ):
+            self.pages.addWidget(page)
             self.pages.addWidget(page)
         main_layout.addWidget(self.pages, 1)
         self.setStyleSheet(self.get_stylesheet())
@@ -328,39 +332,52 @@ class MainWindow(QMainWindow):
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(220)
+
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(18, 24, 18, 18)
         layout.setSpacing(8)
+
         logo = QLabel("Ubuntu DevTools")
         logo.setObjectName("Logo")
+
         subtitle = QLabel("Developer Productivity")
         subtitle.setObjectName("SidebarSubtitle")
+
         layout.addWidget(logo)
         layout.addWidget(subtitle)
         layout.addSpacing(25)
+
         self.navigation = QListWidget()
         self.navigation.setObjectName("Navigation")
+
         for text in (
             "Dashboard",
             "Projects",
             "Workspace Launcher",
             "Port Manager",
             "Project Cache Cleaner",
+            "Docker Manager",
         ):
             self.navigation.addItem(QListWidgetItem(text))
+
         self.navigation.currentRowChanged.connect(self.change_page)
         layout.addWidget(self.navigation)
         layout.addStretch()
+
         version = QLabel("Ubuntu DevTools\nv0.1.0")
         version.setObjectName("Version")
         layout.addWidget(version)
+
         self.navigation.setCurrentRow(0)
+
         return sidebar
 
     def change_page(self, index):
         if not hasattr(self, "pages"):
             return
+
         self.pages.setCurrentIndex(index)
+
         if index == 0:
             self.load_dashboard()
         elif index == 1:
@@ -371,6 +388,371 @@ class MainWindow(QMainWindow):
             self.load_ports()
         elif index == 4:
             pass
+        elif index == 5:
+            self.refresh_docker_dashboard()
+
+    def create_docker_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(25, 25, 25, 25)
+        layout.setSpacing(15)
+
+        # ---------------- Header ----------------
+        header = QHBoxLayout()
+
+        title = QLabel("Docker Manager")
+        title.setStyleSheet("font-size: 25px; font-weight: bold;")
+
+        self.docker_refresh_button = QPushButton("Refresh")
+        self.docker_refresh_button.clicked.connect(
+            self.refresh_docker_dashboard
+        )
+
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.docker_refresh_button)
+
+        layout.addLayout(header)
+
+        description = QLabel(
+            "Manage containers, images and Docker resources."
+        )
+        layout.addWidget(description)
+
+        # ---------------- Docker Status ----------------
+        self.docker_status_label = QLabel(
+            "Checking Docker status..."
+        )
+        self.docker_status_label.setStyleSheet(
+            "font-size: 14px; font-weight: bold; padding: 8px;"
+        )
+
+        self.docker_stats_label = QLabel(
+            "Containers: 0 | Running: 0 | Stopped: 0 | "
+            "Images: 0 | Volumes: 0"
+        )
+        self.docker_stats_label.setStyleSheet(
+            "font-size: 13px; padding: 8px;"
+        )
+
+        layout.addWidget(self.docker_status_label)
+        layout.addWidget(self.docker_stats_label)
+
+        # ---------------- Search and Filter ----------------
+        filter_layout = QHBoxLayout()
+
+        self.docker_search_input = QLineEdit()
+        self.docker_search_input.setPlaceholderText(
+            "Search containers by name, ID or image..."
+        )
+        self.docker_search_input.textChanged.connect(
+            self.filter_docker_containers
+        )
+
+        self.docker_status_filter = QComboBox()
+        self.docker_status_filter.addItems([
+            "All Containers",
+            "Running",
+            "Stopped"
+        ])
+        self.docker_status_filter.currentTextChanged.connect(
+            self.filter_docker_containers
+        )
+
+        filter_layout.addWidget(self.docker_search_input, 3)
+        filter_layout.addWidget(self.docker_status_filter, 1)
+
+        layout.addLayout(filter_layout)
+
+        # ---------------- Container Table ----------------
+        self.docker_container_table = QTableWidget()
+        self.docker_container_table.setColumnCount(5)
+
+        self.docker_container_table.setHorizontalHeaderLabels([
+            "Container ID",
+            "Name",
+            "Image",
+            "Status",
+            "Ports"
+        ])
+
+        self.docker_container_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        self.docker_container_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+
+        self.docker_container_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+
+        self.docker_container_table.setSelectionMode(
+            QAbstractItemView.SingleSelection
+        )
+
+        self.docker_container_table.setAlternatingRowColors(True)
+
+        self.docker_container_table.itemSelectionChanged.connect(
+            self.update_docker_action_buttons
+        )
+
+        layout.addWidget(self.docker_container_table, 1)
+
+        # ---------------- Container Actions ----------------
+        action_label = QLabel("Container Actions")
+        action_label.setStyleSheet(
+            "font-size: 15px; font-weight: bold;"
+        )
+
+        action_layout = QHBoxLayout()
+
+        self.docker_start_button = QPushButton("Start")
+        self.docker_stop_button = QPushButton("Stop")
+        self.docker_restart_button = QPushButton("Restart")
+        self.docker_remove_button = QPushButton("Remove")
+
+        self.docker_start_button.clicked.connect(
+            lambda: self.perform_container_action("start")
+        )
+
+        self.docker_stop_button.clicked.connect(
+            lambda: self.perform_container_action("stop")
+        )
+
+        self.docker_restart_button.clicked.connect(
+            lambda: self.perform_container_action("restart")
+        )
+
+        self.docker_remove_button.clicked.connect(
+            lambda: self.perform_container_action("remove")
+        )
+
+        action_layout.addWidget(self.docker_start_button)
+        action_layout.addWidget(self.docker_stop_button)
+        action_layout.addWidget(self.docker_restart_button)
+        action_layout.addWidget(self.docker_remove_button)
+
+        layout.addWidget(action_label)
+        layout.addLayout(action_layout)
+
+        self.update_docker_action_buttons()
+
+        return page
+
+
+    def refresh_docker_dashboard(self):
+        summary = self.docker_manager.get_dashboard_summary()
+
+        status = summary["status"]["status"]
+
+        if status == "running":
+            self.docker_status_label.setText(
+                f"Docker Engine: Running | "
+                f"Version: {summary['status'].get('server_version', 'Unknown')}"
+            )
+
+        elif status == "not_installed":
+            self.docker_status_label.setText(
+                "Docker is not installed."
+            )
+
+        else:
+            self.docker_status_label.setText(
+                f"Docker Status: {status}"
+            )
+
+        containers = summary.get("containers", {})
+
+        self.docker_stats_label.setText(
+            f"Containers: {containers.get('total', 0)} | "
+            f"Running: {containers.get('running', 0)} | "
+            f"Stopped: {containers.get('stopped', 0)} | "
+            f"Images: {summary.get('images', 0)} | "
+            f"Volumes: {summary.get('volumes', 0)}"
+        )
+
+        self.docker_container_table.setRowCount(0)
+
+        if not summary.get("available"):
+            self.update_docker_action_buttons()
+            return
+
+        result = self.docker_manager.get_containers()
+
+        if not result["success"]:
+            self.docker_status_label.setText(
+                f"Docker Error: {result['error']}"
+            )
+            self.update_docker_action_buttons()
+            return
+
+        for container in result["containers"]:
+            row = self.docker_container_table.rowCount()
+            self.docker_container_table.insertRow(row)
+
+            values = [
+                container["id"],
+                container["name"],
+                container["image"],
+                container["status"],
+                container["ports"]
+            ]
+
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+
+                if column == 0:
+                    item.setData(Qt.UserRole, container["id"])
+
+                if column == 3:
+                    item.setData(Qt.UserRole, container["state"])
+
+                self.docker_container_table.setItem(
+                    row, column, item
+                )
+
+        self.filter_docker_containers()
+        self.update_docker_action_buttons()
+
+
+    def filter_docker_containers(self):
+        search_text = self.docker_search_input.text().strip().lower()
+        selected_filter = self.docker_status_filter.currentText()
+
+        for row in range(self.docker_container_table.rowCount()):
+            container_id = self.docker_container_table.item(row, 0).text().lower()
+            name = self.docker_container_table.item(row, 1).text().lower()
+            image = self.docker_container_table.item(row, 2).text().lower()
+
+            state_item = self.docker_container_table.item(row, 3)
+            state = state_item.data(Qt.UserRole).lower()
+
+            matches_search = (
+                search_text in container_id
+                or search_text in name
+                or search_text in image
+            )
+
+            matches_filter = (
+                selected_filter == "All Containers"
+                or (selected_filter == "Running" and state == "running")
+                or (selected_filter == "Stopped" and state != "running")
+            )
+
+            self.docker_container_table.setRowHidden(
+                row,
+                not (matches_search and matches_filter)
+            )
+
+        self.update_docker_action_buttons()
+
+
+    def update_docker_action_buttons(self):
+        table = getattr(self, "docker_container_table", None)
+
+        if table is None:
+            return
+
+        selected_rows = table.selectionModel().selectedRows()
+
+        if not selected_rows:
+            self.docker_start_button.setEnabled(False)
+            self.docker_stop_button.setEnabled(False)
+            self.docker_restart_button.setEnabled(False)
+            self.docker_remove_button.setEnabled(False)
+            return
+
+        row = selected_rows[0].row()
+
+        state_item = table.item(row, 3)
+
+        if state_item is None:
+            return
+
+        state = state_item.data(Qt.UserRole).lower()
+        is_running = state == "running"
+
+        self.docker_start_button.setEnabled(not is_running)
+        self.docker_stop_button.setEnabled(is_running)
+        self.docker_restart_button.setEnabled(is_running)
+        self.docker_remove_button.setEnabled(not is_running)
+
+    def get_selected_docker_container(self):
+        selected_rows = (
+            self.docker_container_table.selectionModel().selectedRows()
+        )
+
+        if not selected_rows:
+            return None
+
+        row = selected_rows[0].row()
+
+        item = self.docker_container_table.item(row, 0)
+
+        if item is None:
+            return None
+
+        return item.data(Qt.UserRole)
+
+    def perform_container_action(self, action):
+        container_id = self.get_selected_docker_container()
+
+        if not container_id:
+            QMessageBox.warning(
+                self,
+                "No Container Selected",
+                "Please select a container first."
+            )
+            return
+
+        if action == "remove":
+            reply = QMessageBox.question(
+                self,
+                "Remove Container",
+                f"Are you sure you want to remove container {container_id}?\n\n"
+                "This action cannot be undone.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+
+            if reply != QMessageBox.Yes:
+                return
+
+        if action == "start":
+            result = self.docker_manager.start_container(container_id)
+
+        elif action == "stop":
+            result = self.docker_manager.stop_container(container_id)
+
+        elif action == "restart":
+            result = self.docker_manager.restart_container(container_id)
+
+        elif action == "remove":
+            result = self.docker_manager.remove_container(
+                container_id,
+                force=False
+            )
+
+        else:
+            return
+
+        if result["success"]:
+            QMessageBox.information(
+                self,
+                "Docker Manager",
+                f"Container {action} operation completed successfully."
+            )
+
+            self.refresh_docker_dashboard()
+
+        else:
+            QMessageBox.critical(
+                self,
+                "Docker Operation Failed",
+                result.get("error") or "Unknown Docker error."
+            )
 
     # -------------------- Shared UI helpers --------------------
     @staticmethod
