@@ -9,14 +9,20 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtGui import (
+    QColor,
+    QPainter,
+    QPen,
+    QFont,
+    QBrush
+)
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QPushButton, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView,
     QComboBox, QInputDialog, QFileDialog, QMessageBox, QMenu, QTextEdit,
-    QGroupBox, QProgressBar, QSplitter, QCheckBox, QAbstractItemView
+    QGroupBox, QProgressBar, QSplitter, QCheckBox, QAbstractItemView, QDialog,QDialog,QGridLayout
 )
 from openpyxl import Workbook
 
@@ -251,6 +257,436 @@ class CacheScanWorker(QThread):
         except Exception as error:
             self.failed.emit(f"{type(error).__name__}: {error}")
 
+class DockerStatsWorker(QThread):
+        completed = Signal(object)
+        failed = Signal(str)
+
+        def __init__(self, docker_manager):
+            super().__init__()
+            self.docker_manager = docker_manager
+
+        def run(self):
+            try:
+                result = self.docker_manager.get_container_stats_summary()
+
+                if result["success"]:
+                    self.completed.emit(result)
+                else:
+                    self.failed.emit(
+                        result.get("error", "Unable to fetch Docker statistics.")
+                    )
+
+            except Exception as error:
+                self.failed.emit(
+                    f"{type(error).__name__}: {error}"
+                )
+
+class DonutChart(QWidget):
+
+    def __init__(self, title, color, parent=None):
+        super().__init__(parent)
+
+        self.title = title
+        self.color = QColor(color)
+        self.value = 0.0
+        self.subtitle = "Usage"
+
+        self.setMinimumSize(190, 190)
+
+    def set_value(self, value, subtitle="Usage"):
+        try:
+            self.value = max(0.0, min(float(value), 100.0))
+        except (ValueError, TypeError):
+            self.value = 0.0
+
+        self.subtitle = subtitle
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        width = self.width()
+        height = self.height()
+
+        # Chart dimensions
+        size = min(width, height) - 55
+        rect_x = (width - size) / 2
+        rect_y = 35
+
+        from PySide6.QtCore import QRectF
+        rect = QRectF(rect_x, rect_y, size, size)
+
+        # Background ring
+        background_pen = QPen(QColor("#303746"), 13)
+        background_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(background_pen)
+        painter.drawArc(rect, 0, 360 * 16)
+
+        # Usage ring
+        usage_pen = QPen(self.color, 13)
+        usage_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(usage_pen)
+
+        span = int(-self.value * 360 / 100 * 16)
+        painter.drawArc(rect, 90 * 16, span)
+
+        # Percentage in center
+        painter.setPen(QColor("#FFFFFF"))
+
+        value_font = QFont("Arial", 21)
+        value_font.setBold(True)
+        painter.setFont(value_font)
+
+        painter.drawText(
+            rect,
+            Qt.AlignmentFlag.AlignCenter,
+            f"{self.value:.2f}%"
+        )
+
+        # Chart title above the ring
+        painter.setPen(QColor("#E5E7EB"))
+
+        title_font = QFont("Arial", 11)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+
+        painter.drawText(
+            QRectF(0, 5, width, 25),
+            Qt.AlignmentFlag.AlignCenter,
+            self.title
+        )
+
+        painter.end()
+
+class ResourceMetricCard(QFrame):
+
+    def __init__(self, title, color, parent=None):
+        super().__init__(parent)
+
+        self.setObjectName("resourceMetricCard")
+
+        self.setStyleSheet("""
+            QFrame#resourceMetricCard {
+                background-color: #202938;
+                border: 1px solid #354154;
+                border-radius: 12px;
+            }
+
+            QLabel {
+                border: none;
+                background: transparent;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 15, 18, 15)
+        layout.setSpacing(8)
+
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet(
+            f"color: {color}; font-size: 13px; font-weight: bold;"
+        )
+
+        self.primary_label = QLabel("0 B")
+        self.primary_label.setStyleSheet("""
+            color: #FFFFFF;
+            font-size: 21px;
+            font-weight: bold;
+        """)
+
+        self.secondary_label = QLabel("Receive: 0 B")
+        self.secondary_label.setStyleSheet("""
+            color: #9CA3AF;
+            font-size: 12px;
+        """)
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.primary_label)
+        layout.addWidget(self.secondary_label)
+
+    def update_values(self, primary, secondary):
+        self.primary_label.setText(primary)
+        self.secondary_label.setText(secondary)
+
+class DockerResourceDialog(QDialog):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("Docker Resource Monitor")
+        self.resize(780, 650)
+        self.setMinimumSize(700, 580)
+
+        self.container_stats = []
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #151B26;
+                color: #FFFFFF;
+            }
+
+            QLabel {
+                color: #E5E7EB;
+            }
+
+            QComboBox {
+                background-color: #202938;
+                color: white;
+                border: 1px solid #354154;
+                border-radius: 7px;
+                padding: 9px;
+                min-width: 180px;
+            }
+
+            QComboBox QAbstractItemView {
+                background-color: #202938;
+                color: white;
+                selection-background-color: #374151;
+            }
+
+            QPushButton {
+                background-color: #2563EB;
+                color: white;
+                border: none;
+                border-radius: 7px;
+                padding: 9px 16px;
+                font-weight: bold;
+            }
+
+            QPushButton:hover {
+                background-color: #1D4ED8;
+            }
+        """)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(25, 22, 25, 22)
+        main_layout.setSpacing(18)
+
+        # Header
+        header = QHBoxLayout()
+
+        title = QLabel("Resource Overview")
+        title.setStyleSheet("""
+            font-size: 23px;
+            font-weight: bold;
+            color: white;
+        """)
+
+        self.status_label = QLabel("Waiting for data...")
+        self.status_label.setStyleSheet(
+            "color: #9CA3AF; font-size: 12px;"
+        )
+
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.status_label)
+
+        main_layout.addLayout(header)
+
+        # Container selector
+        selector_layout = QHBoxLayout()
+
+        selector_label = QLabel("Select Container")
+
+        self.container_selector = QComboBox()
+        self.container_selector.currentIndexChanged.connect(
+            self.update_selected_container
+        )
+
+        selector_layout.addWidget(selector_label)
+        selector_layout.addWidget(self.container_selector)
+        selector_layout.addStretch()
+
+        main_layout.addLayout(selector_layout)
+
+        # CPU and RAM Charts
+        chart_layout = QGridLayout()
+        chart_layout.setSpacing(20)
+
+        self.cpu_chart = DonutChart(
+            "CPU Usage",
+            "#22C55E"
+        )
+
+        self.memory_chart = DonutChart(
+            "Memory Usage",
+            "#3B82F6"
+        )
+
+        chart_layout.addWidget(self.cpu_chart, 0, 0)
+        chart_layout.addWidget(self.memory_chart, 0, 1)
+
+        main_layout.addLayout(chart_layout)
+
+        # Network and Disk Cards
+        metric_layout = QGridLayout()
+        metric_layout.setSpacing(15)
+
+        self.network_card = ResourceMetricCard(
+            "NETWORK I/O",
+            "#A78BFA"
+        )
+
+        self.disk_card = ResourceMetricCard(
+            "DISK I/O",
+            "#F59E0B"
+        )
+
+        metric_layout.addWidget(self.network_card, 0, 0)
+        metric_layout.addWidget(self.disk_card, 0, 1)
+
+        main_layout.addLayout(metric_layout)
+
+        # Footer
+        footer = QHBoxLayout()
+
+        self.process_label = QLabel("Processes: 0")
+        self.process_label.setStyleSheet(
+            "color: #9CA3AF; font-size: 12px;"
+        )
+
+        self.refresh_info = QLabel(
+            "Live monitoring: Every 5 seconds"
+        )
+        self.refresh_info.setStyleSheet(
+            "color: #9CA3AF; font-size: 12px;"
+        )
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.close)
+
+        footer.addWidget(self.process_label)
+        footer.addStretch()
+        footer.addWidget(self.refresh_info)
+        footer.addWidget(close_button)
+
+        main_layout.addLayout(footer)
+
+    def update_stats(self, stats):
+
+        self.container_stats = stats or []
+
+        current_name = self.container_selector.currentData()
+
+        self.container_selector.blockSignals(True)
+        self.container_selector.clear()
+
+        for container in self.container_stats:
+            name = container.get("name", "Unknown")
+            self.container_selector.addItem(name, name)
+
+        if current_name:
+            index = self.container_selector.findData(current_name)
+
+            if index >= 0:
+                self.container_selector.setCurrentIndex(index)
+
+        self.container_selector.blockSignals(False)
+
+        if not self.container_stats:
+            self.status_label.setText("No running containers")
+            self.cpu_chart.set_value(0)
+            self.memory_chart.set_value(0)
+            self.network_card.update_values(
+                "No data", "Receive / Transmit"
+            )
+            self.disk_card.update_values(
+                "No data", "Read / Write"
+            )
+            self.process_label.setText("Processes: 0")
+            return
+
+        self.update_selected_container()
+
+        self.status_label.setText(
+            f"{len(self.container_stats)} container(s) monitored"
+        )
+
+    def update_selected_container(self, index=None):
+
+        selected_name = self.container_selector.currentData()
+
+        if not selected_name:
+            return
+
+        container = next(
+            (
+                item for item in self.container_stats
+                if item.get("name") == selected_name
+            ),
+            None
+        )
+
+        if not container:
+            return
+
+        # CPU
+        cpu_value = self.parse_percentage(
+            container.get("cpu", "0%")
+        )
+
+        self.cpu_chart.set_value(
+            cpu_value,
+            "CPU utilization"
+        )
+
+        # Memory
+        memory_value = self.parse_percentage(
+            container.get("memory_percent", "0%")
+        )
+
+        memory_usage = container.get(
+            "memory_usage", "0B / 0B"
+        )
+
+        self.memory_chart.set_value(
+            memory_value,
+            memory_usage
+        )
+
+        # Network I/O
+        network = self.split_io(
+            container.get("network_io", "0B / 0B")
+        )
+
+        self.network_card.update_values(
+            f"↓ {network[0]}",
+            f"↑ {network[1]} transmitted"
+        )
+
+        # Disk I/O
+        disk = self.split_io(
+            container.get("block_io", "0B / 0B")
+        )
+
+        self.disk_card.update_values(
+            f"Read: {disk[0]}",
+            f"Write: {disk[1]}"
+        )
+
+        # PIDs
+        self.process_label.setText(
+            f"Processes: {container.get('pids', '0')}"
+        )
+
+    @staticmethod
+    def parse_percentage(value):
+
+        try:
+            return float(str(value).replace("%", "").strip())
+        except (ValueError, TypeError):
+            return 0.0
+
+    @staticmethod
+    def split_io(value):
+
+        parts = str(value).split("/", 1)
+
+        if len(parts) == 2:
+            return parts[0].strip(), parts[1].strip()
+
+        return str(value), "0 B"
 
 # ==================================================
 # Main Window
@@ -281,9 +717,113 @@ class MainWindow(QMainWindow):
         self.workspace_project = None
         self.workspace_analysis = None
         self.workspace_dependencies = []
+        self.docker_resource_dialog = None
 
         self.setup_ui()
+
+        # Docker resource monitoring
+        self.docker_stats_worker = None
+
+        self.docker_stats_timer = QTimer(self)
+        self.docker_stats_timer.timeout.connect(
+            self.refresh_docker_resource_stats
+        )
+        self.docker_stats_timer.start(5000)
+
         self.load_dashboard()
+
+
+    def refresh_docker_resource_stats(self):
+
+    # Prevent overlapping workers
+        if self.docker_stats_worker is not None:
+            if self.docker_stats_worker.isRunning():
+                return
+
+        self.docker_stats_worker = DockerStatsWorker(
+            self.docker_manager
+        )
+
+        self.docker_stats_worker.completed.connect(
+            self.update_docker_resource_table
+        )
+
+        self.docker_stats_worker.failed.connect(
+            self.handle_docker_stats_error
+        )
+
+        self.docker_stats_worker.finished.connect(
+            self.on_docker_stats_worker_finished
+        )
+
+        self.docker_stats_worker.finished.connect(
+            self.docker_stats_worker.deleteLater
+        )
+
+        self.docker_stats_worker.start()
+
+
+
+    def update_docker_resource_table(self, result):
+
+        stats = result.get("stats", [])
+
+        self.docker_resource_table.setRowCount(0)
+
+        if not stats:
+            self.docker_resource_status.setText(
+                "No running containers to monitor."
+            )
+            return
+
+        for container in stats:
+
+            row = self.docker_resource_table.rowCount()
+            self.docker_resource_table.insertRow(row)
+
+            values = [
+                container.get("name", ""),
+                container.get("cpu", "0%"),
+                container.get("memory_usage", "0B / 0B"),
+                container.get("memory_percent", "0%"),
+                container.get("network_io", "0B / 0B"),
+                container.get("block_io", "0B / 0B"),
+                container.get("pids", "0")
+            ]
+
+            for column, value in enumerate(values):
+
+                item = QTableWidgetItem(str(value))
+
+                if column == 0:
+                    item.setData(
+                        Qt.UserRole,
+                        container.get("container", "")
+                    )
+
+                self.docker_resource_table.setItem(
+                    row, column, item
+                )
+
+        self.docker_resource_status.setText(
+            f"Monitoring {len(stats)} running container(s) | "
+            "Auto-refresh: 5 seconds"
+        )
+
+    def on_docker_stats_worker_finished(self):
+        self.docker_stats_worker = None
+
+
+    def handle_docker_stats_error(self, error):
+
+        self.docker_resource_status.setText(
+            f"Monitoring error: {error}"
+        )
+
+
+    def on_docker_stats_worker_finished(self):
+
+        self.docker_stats_worker = None
 
     # -------------------- Main UI --------------------
     def setup_ui(self):
@@ -309,7 +849,6 @@ class MainWindow(QMainWindow):
             self.cache_cleaner_page,
             self.docker_page,
         ):
-            self.pages.addWidget(page)
             self.pages.addWidget(page)
         main_layout.addWidget(self.pages, 1)
         self.setStyleSheet(self.get_stylesheet())
@@ -534,13 +1073,101 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.docker_restart_button)
         action_layout.addWidget(self.docker_remove_button)
 
+        # NEW: Details & View Logs buttons
+        self.docker_details_button = QPushButton("Details")
+        self.docker_logs_button = QPushButton("View Logs")
+
+        self.docker_details_button.clicked.connect(
+            self.show_docker_container_details
+        )
+        self.docker_logs_button.clicked.connect(
+            self.show_docker_container_logs
+        )
+
+        action_layout.addWidget(self.docker_details_button)
+        action_layout.addWidget(self.docker_logs_button)
+
         layout.addWidget(action_label)
         layout.addLayout(action_layout)
+
+        # ---------------- Resource Monitoring ----------------
+        resource_header = QHBoxLayout()
+
+        resource_title = QLabel("Resource Monitoring")
+        resource_title.setStyleSheet(
+            "font-size: 17px; font-weight: bold; margin-top: 12px;"
+        )
+
+        self.docker_resource_status = QLabel(
+            "Waiting for resource data..."
+        )
+        self.docker_resource_status.setStyleSheet(
+            "font-size: 12px; color: #aaaaaa;"
+        )
+
+        self.docker_visual_button = QPushButton("◉ Visual Monitor")
+        self.docker_visual_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2563EB;
+                color: white;
+                border: none;
+                border-radius: 7px;
+                padding: 9px 15px;
+                font-weight: bold;
+            }
+
+            QPushButton:hover {
+                background-color: #1D4ED8;
+            }
+        """)
+
+        self.docker_visual_button.clicked.connect(
+            self.show_docker_visual_monitor
+        )
+
+        resource_header.addWidget(resource_title)
+        resource_header.addStretch()
+        resource_header.addWidget(self.docker_resource_status)
+        resource_header.addWidget(self.docker_visual_button)
+
+        layout.addLayout(resource_header)
+
+        layout.addLayout(resource_header)
+
+        self.docker_resource_table = QTableWidget()
+        self.docker_resource_table.setColumnCount(7)
+
+        self.docker_resource_table.setHorizontalHeaderLabels([
+            "Container",
+            "CPU %",
+            "Memory Usage",
+            "Memory %",
+            "Network I/O",
+            "Block I/O",
+            "PIDs"
+        ])
+
+        self.docker_resource_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+
+        self.docker_resource_table.setEditTriggers(
+            QAbstractItemView.NoEditTriggers
+        )
+
+        self.docker_resource_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+
+        self.docker_resource_table.setAlternatingRowColors(True)
+
+        self.docker_resource_table.setMinimumHeight(150)
+
+        layout.addWidget(self.docker_resource_table)
 
         self.update_docker_action_buttons()
 
         return page
-
 
     def refresh_docker_dashboard(self):
         summary = self.docker_manager.get_dashboard_summary()
@@ -662,6 +1289,8 @@ class MainWindow(QMainWindow):
             self.docker_stop_button.setEnabled(False)
             self.docker_restart_button.setEnabled(False)
             self.docker_remove_button.setEnabled(False)
+            self.docker_details_button.setEnabled(False)
+            self.docker_logs_button.setEnabled(False)
             return
 
         row = selected_rows[0].row()
@@ -678,6 +1307,9 @@ class MainWindow(QMainWindow):
         self.docker_stop_button.setEnabled(is_running)
         self.docker_restart_button.setEnabled(is_running)
         self.docker_remove_button.setEnabled(not is_running)
+
+        self.docker_details_button.setEnabled(True)
+        self.docker_logs_button.setEnabled(True)
 
     def get_selected_docker_container(self):
         selected_rows = (
@@ -753,6 +1385,181 @@ class MainWindow(QMainWindow):
                 "Docker Operation Failed",
                 result.get("error") or "Unknown Docker error."
             )
+
+    # NEW: Container Details dialog
+    def show_docker_container_details(self):
+        container_id = self.get_selected_docker_container()
+        if not container_id:
+            return
+
+        result = self.docker_manager.get_container_details(container_id)
+
+        if not result["success"]:
+            QMessageBox.critical(
+                self,
+                "Container Details Error",
+                result["error"] or "Unable to retrieve container details."
+            )
+            return
+
+        details = result["details"]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Container Details - {container_id[:12]}")
+        dialog.resize(750, 650)
+
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel(
+            f"Container: {details.get('name', container_id[:12])}"
+        )
+        title.setStyleSheet(
+            "font-size: 16px; font-weight: bold;"
+        )
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setLineWrapMode(QTextEdit.NoWrap)
+
+        details_text = f"""
+        CONTAINER INFORMATION
+        {'=' * 50}
+        ID:
+        {details.get('id', 'N/A')}
+
+        Name:
+        {details.get('name', 'N/A')}
+
+        Image:
+        {details.get('image', 'N/A')}
+
+        Created:
+        {details.get('created', 'N/A')}
+
+        CONTAINER STATUS
+        {'=' * 50}
+        State:
+        {details.get('status', 'N/A')}
+
+        Running:
+        {'Yes' if details.get('running') else 'No'}
+
+        Started At:
+        {details.get('started_at', 'N/A')}
+
+        Finished At:
+        {details.get('finished_at', 'N/A')}
+
+        Restart Policy:
+        {details.get('restart_policy', 'N/A')}
+
+        PORT MAPPINGS
+        {'=' * 50}
+        {chr(10).join(details.get('ports', [])) or 'No published ports'}
+
+        VOLUME MOUNTS
+        {'=' * 50}
+        {json.dumps(details.get('mounts', {}), indent=4)}
+
+        NETWORK INFORMATION
+        {'=' * 50}
+        {json.dumps(details.get('networks', {}), indent=4)}
+        """
+        text.setPlainText(details_text)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+
+        layout.addWidget(title)
+        layout.addWidget(text)
+        layout.addWidget(close_button)
+
+        dialog.exec()
+
+    # NEW: Container Logs dialog
+    def show_docker_container_logs(self):
+        container_id = self.get_selected_docker_container()
+        if not container_id:
+            return
+
+        result = self.docker_manager.get_container_logs(
+            container_id,
+            tail=200
+        )
+
+        if not result["success"]:
+            QMessageBox.critical(
+                self,
+                "Container Logs Error",
+                result["error"] or "Unable to retrieve container logs."
+            )
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            f"Container Logs - {container_id[:12]}"
+        )
+        dialog.resize(850, 600)
+
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel(
+            f"Latest 200 log lines | Container: {container_id[:12]}"
+        )
+        title.setStyleSheet(
+            "font-size: 16px; font-weight: bold;"
+        )
+
+        logs_text = QTextEdit()
+        logs_text.setReadOnly(True)
+        logs_text.setLineWrapMode(QTextEdit.NoWrap)
+        logs_text.setPlainText(
+            result["logs"] or "No logs available for this container."
+        )
+        logs_text.moveCursor(
+            logs_text.textCursor().MoveOperation.End
+        )
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+
+        layout.addWidget(title)
+        layout.addWidget(logs_text)
+        layout.addWidget(close_button)
+
+        dialog.exec()
+
+    def show_docker_visual_monitor(self):
+
+        if self.docker_resource_dialog is None:
+
+            self.docker_resource_dialog = DockerResourceDialog(self)
+
+            self.docker_resource_dialog.finished.connect(
+                self.on_docker_resource_dialog_closed
+            )
+
+        # Show latest available data immediately
+        if self.docker_resource_dialog is not None:
+            if hasattr(self, "docker_resource_table"):
+
+                stats = self.docker_manager.get_container_stats_summary()
+
+                if stats["success"]:
+                    self.docker_resource_dialog.update_stats(
+                        stats["stats"]
+                    )
+
+        self.docker_resource_dialog.show()
+        self.docker_resource_dialog.raise_()
+        self.docker_resource_dialog.activateWindow()
+
+
+    def on_docker_resource_dialog_closed(self, result=None):
+
+        self.docker_resource_dialog = None
+
+    
 
     # -------------------- Shared UI helpers --------------------
     @staticmethod

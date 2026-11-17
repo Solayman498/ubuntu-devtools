@@ -377,3 +377,222 @@ class DockerManager:
             "success": False,
             "message": result.stderr.strip() or "Unable to stop Docker."
         }
+
+    def get_container_details(self, container_id):
+
+        result = self.execute_command([
+            self.docker_path,
+            "inspect",
+            container_id
+        ])
+
+        if not result["success"]:
+            return {
+                "success": False,
+                "details": None,
+                "error": result["error"]
+            }
+
+        try:
+            data = json.loads(result["output"])[0]
+
+            state = data.get("State", {})
+            config = data.get("Config", {})
+            host_config = data.get("HostConfig", {})
+            network_settings = data.get("NetworkSettings", {})
+
+            ports = network_settings.get("Ports") or {}
+
+            port_info = []
+
+            for container_port, bindings in ports.items():
+                if bindings:
+                    for binding in bindings:
+                        port_info.append(
+                            f"{binding.get('HostIp', '0.0.0.0')}:"
+                            f"{binding.get('HostPort')} -> {container_port}"
+                        )
+                else:
+                    port_info.append(
+                        f"{container_port} (not published)"
+                    )
+
+            mounts = []
+
+            for mount in data.get("Mounts", []):
+                mounts.append({
+                    "type": mount.get("Type", ""),
+                    "source": mount.get("Source", ""),
+                    "destination": mount.get("Destination", ""),
+                    "mode": mount.get("Mode", ""),
+                    "rw": mount.get("RW", False)
+                })
+
+            networks = []
+
+            for name, network in (
+                network_settings.get("Networks") or {}
+            ).items():
+                networks.append({
+                    "name": name,
+                    "ip_address": network.get("IPAddress", ""),
+                    "gateway": network.get("Gateway", "")
+                })
+
+            details = {
+                "id": data.get("Id", ""),
+                "name": data.get("Name", "").lstrip("/"),
+                "image": config.get("Image", ""),
+                "created": data.get("Created", ""),
+                "status": state.get("Status", ""),
+                "running": state.get("Running", False),
+                "started_at": state.get("StartedAt", ""),
+                "finished_at": state.get("FinishedAt", ""),
+                "restart_policy": (
+                    host_config.get("RestartPolicy", {}).get("Name", "no")
+                ),
+                "ports": port_info,
+                "mounts": mounts,
+                "networks": networks
+            }
+
+            return {
+                "success": True,
+                "details": details,
+                "error": None
+            }
+
+        except (json.JSONDecodeError, IndexError, TypeError) as error:
+            return {
+                "success": False,
+                "details": None,
+                "error": str(error)
+            }
+
+
+    def get_container_logs(self, container_id, tail=200):
+
+        if not self.is_docker_installed():
+            return {
+                "success": False,
+                "logs": "",
+                "error": "Docker is not installed."
+            }
+
+        try:
+            result = subprocess.run(
+                [
+                    self.docker_path,
+                    "logs",
+                    "--timestamps",
+                    "--tail",
+                    str(tail),
+                    container_id
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            logs = result.stdout + result.stderr
+
+            return {
+                "success": result.returncode == 0,
+                "logs": logs.strip(),
+                "error": (
+                    result.stderr.strip()
+                    if result.returncode != 0
+                    else None
+                )
+            }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "logs": "",
+                "error": "Fetching container logs timed out."
+            }
+
+        except Exception as error:
+            return {
+                "success": False,
+                "logs": "",
+                "error": str(error)
+            }
+
+
+    def get_container_stats(self):
+        if not self.is_docker_installed():
+            return {
+                "success": False,
+                "stats": [],
+                "error": "Docker is not installed."
+            }
+
+        status = self.get_docker_status()
+
+        if status["status"] != "running":
+            return {
+                "success": False,
+                "stats": [],
+                "error": "Docker daemon is not running or accessible."
+            }
+
+        result = self.execute_command(
+            [
+                self.docker_path,
+                "stats",
+                "--no-stream",
+                "--format",
+                "{{json .}}"
+            ],
+            timeout=15
+        )
+
+        if not result["success"]:
+            return {
+                "success": False,
+                "stats": [],
+                "error": result["error"]
+            }
+
+        stats = []
+
+        for line in result["output"].splitlines():
+            try:
+                data = json.loads(line)
+
+                stats.append({
+                    "container": data.get("Container", ""),
+                    "name": data.get("Name", ""),
+                    "cpu": data.get("CPUPerc", "0%"),
+                    "memory_usage": data.get("MemUsage", "0B / 0B"),
+                    "memory_percent": data.get("MemPerc", "0%"),
+                    "network_io": data.get("NetIO", "0B / 0B"),
+                    "block_io": data.get("BlockIO", "0B / 0B"),
+                    "pids": data.get("PIDs", "0")
+                })
+
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        return {
+            "success": True,
+            "stats": stats,
+            "error": None
+        }
+
+    def get_container_stats_summary(self):
+        result = self.get_container_stats()
+
+        if not result["success"]:
+            return result
+
+        stats = result["stats"]
+
+        return {
+            "success": True,
+            "total_monitored": len(stats),
+            "stats": stats,
+            "error": None
+        }
