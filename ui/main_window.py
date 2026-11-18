@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QMainWindow, QPushButton, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView,
     QComboBox, QInputDialog, QFileDialog, QMessageBox, QMenu, QTextEdit,
-    QGroupBox, QProgressBar, QSplitter, QCheckBox, QAbstractItemView, QDialog,QDialog,QGridLayout
+    QGroupBox, QProgressBar, QSplitter, QCheckBox, QAbstractItemView,
+    QDialog, QGridLayout, QTabWidget, QScrollArea
 )
 from openpyxl import Workbook
 
@@ -931,10 +932,23 @@ class MainWindow(QMainWindow):
             self.refresh_docker_dashboard()
 
     def create_docker_page(self):
+        # ---- Scrollable page wrapper ----
+        outer = QWidget()
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(25, 25, 25, 25)
         layout.setSpacing(15)
+
+        scroll.setWidget(page)
+        outer_layout.addWidget(scroll)
 
         # ---------------- Header ----------------
         header = QHBoxLayout()
@@ -959,9 +973,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(description)
 
         # ---------------- Docker Status ----------------
-        self.docker_status_label = QLabel(
-            "Checking Docker status..."
-        )
+        self.docker_status_label = QLabel("Checking Docker status...")
         self.docker_status_label.setStyleSheet(
             "font-size: 14px; font-weight: bold; padding: 8px;"
         )
@@ -977,7 +989,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.docker_status_label)
         layout.addWidget(self.docker_stats_label)
 
-        # ---------------- Search and Filter ----------------
+        # ---------------- Section switcher (Tabs) ----------------
+        self.docker_section_tabs = QTabWidget()
+
+        # ================================================================
+        # SECTION 1 — Containers  (+ Resource Monitoring inside)
+        # ================================================================
+        container_section = QWidget()
+        container_layout = QVBoxLayout(container_section)
+        container_layout.setContentsMargins(0, 10, 0, 0)
+        container_layout.setSpacing(12)
+
+        # Search / filter
         filter_layout = QHBoxLayout()
 
         self.docker_search_input = QLineEdit()
@@ -1001,49 +1024,37 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.docker_search_input, 3)
         filter_layout.addWidget(self.docker_status_filter, 1)
 
-        layout.addLayout(filter_layout)
+        container_layout.addLayout(filter_layout)
 
-        # ---------------- Container Table ----------------
+        # Container table
         self.docker_container_table = QTableWidget()
         self.docker_container_table.setColumnCount(5)
-
         self.docker_container_table.setHorizontalHeaderLabels([
-            "Container ID",
-            "Name",
-            "Image",
-            "Status",
-            "Ports"
+            "Container ID", "Name", "Image", "Status", "Ports"
         ])
-
         self.docker_container_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
-
         self.docker_container_table.setEditTriggers(
             QAbstractItemView.NoEditTriggers
         )
-
         self.docker_container_table.setSelectionBehavior(
             QAbstractItemView.SelectRows
         )
-
         self.docker_container_table.setSelectionMode(
             QAbstractItemView.SingleSelection
         )
-
         self.docker_container_table.setAlternatingRowColors(True)
-
+        self.docker_container_table.setMinimumHeight(220)
         self.docker_container_table.itemSelectionChanged.connect(
             self.update_docker_action_buttons
         )
+        container_layout.addWidget(self.docker_container_table)
 
-        layout.addWidget(self.docker_container_table, 1)
-
-        # ---------------- Container Actions ----------------
+        # Container actions
         action_label = QLabel("Container Actions")
-        action_label.setStyleSheet(
-            "font-size: 15px; font-weight: bold;"
-        )
+        action_label.setStyleSheet("font-size: 15px; font-weight: bold;")
+        container_layout.addWidget(action_label)
 
         action_layout = QHBoxLayout()
 
@@ -1055,15 +1066,12 @@ class MainWindow(QMainWindow):
         self.docker_start_button.clicked.connect(
             lambda: self.perform_container_action("start")
         )
-
         self.docker_stop_button.clicked.connect(
             lambda: self.perform_container_action("stop")
         )
-
         self.docker_restart_button.clicked.connect(
             lambda: self.perform_container_action("restart")
         )
-
         self.docker_remove_button.clicked.connect(
             lambda: self.perform_container_action("remove")
         )
@@ -1073,7 +1081,6 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.docker_restart_button)
         action_layout.addWidget(self.docker_remove_button)
 
-        # NEW: Details & View Logs buttons
         self.docker_details_button = QPushButton("Details")
         self.docker_logs_button = QPushButton("View Logs")
 
@@ -1087,15 +1094,14 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.docker_details_button)
         action_layout.addWidget(self.docker_logs_button)
 
-        layout.addWidget(action_label)
-        layout.addLayout(action_layout)
+        container_layout.addLayout(action_layout)
 
-        # ---------------- Resource Monitoring ----------------
+        # ---------------- Resource Monitoring (INSIDE Containers) ----------------
         resource_header = QHBoxLayout()
 
         resource_title = QLabel("Resource Monitoring")
         resource_title.setStyleSheet(
-            "font-size: 17px; font-weight: bold; margin-top: 12px;"
+            "font-size: 15px; font-weight: bold; margin-top: 12px;"
         )
 
         self.docker_resource_status = QLabel(
@@ -1120,7 +1126,6 @@ class MainWindow(QMainWindow):
                 background-color: #1D4ED8;
             }
         """)
-
         self.docker_visual_button.clicked.connect(
             self.show_docker_visual_monitor
         )
@@ -1130,13 +1135,10 @@ class MainWindow(QMainWindow):
         resource_header.addWidget(self.docker_resource_status)
         resource_header.addWidget(self.docker_visual_button)
 
-        layout.addLayout(resource_header)
-
-        layout.addLayout(resource_header)
+        container_layout.addLayout(resource_header)
 
         self.docker_resource_table = QTableWidget()
         self.docker_resource_table.setColumnCount(7)
-
         self.docker_resource_table.setHorizontalHeaderLabels([
             "Container",
             "CPU %",
@@ -1146,28 +1148,114 @@ class MainWindow(QMainWindow):
             "Block I/O",
             "PIDs"
         ])
-
         self.docker_resource_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
-
         self.docker_resource_table.setEditTriggers(
             QAbstractItemView.NoEditTriggers
         )
-
         self.docker_resource_table.setSelectionBehavior(
             QAbstractItemView.SelectRows
         )
-
         self.docker_resource_table.setAlternatingRowColors(True)
+        self.docker_resource_table.setMinimumHeight(200)
 
-        self.docker_resource_table.setMinimumHeight(150)
+        container_layout.addWidget(self.docker_resource_table)
+        container_layout.addStretch()
 
-        layout.addWidget(self.docker_resource_table)
+        self.docker_section_tabs.addTab(container_section, "Containers")
+
+        # ================================================================
+        # SECTION 2 — Images
+        # ================================================================
+        image_section = QWidget()
+        image_layout = QVBoxLayout(image_section)
+        image_layout.setContentsMargins(0, 10, 0, 0)
+        image_layout.setSpacing(12)
+
+        # Image search / status
+        image_search_layout = QHBoxLayout()
+
+        self.docker_image_search = QLineEdit()
+        self.docker_image_search.setPlaceholderText(
+            "Search images by repository or tag..."
+        )
+        self.docker_image_search.textChanged.connect(
+            self.filter_docker_images
+        )
+
+        self.docker_image_status = QLabel("Total images: 0")
+        self.docker_image_status.setStyleSheet(
+            "font-size: 12px; color: #aaaaaa;"
+        )
+
+        image_search_layout.addWidget(self.docker_image_search, 3)
+        image_search_layout.addWidget(self.docker_image_status, 1)
+
+        image_layout.addLayout(image_search_layout)
+
+        # Image table
+        self.docker_image_table = QTableWidget()
+        self.docker_image_table.setColumnCount(5)
+        self.docker_image_table.setHorizontalHeaderLabels([
+            "Repository", "Tag", "Image ID", "Size", "Created"
+        ])
+        self.docker_image_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.docker_image_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self.docker_image_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.docker_image_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.docker_image_table.setAlternatingRowColors(True)
+        self.docker_image_table.setMinimumHeight(300)
+        image_layout.addWidget(self.docker_image_table)
+
+        # Image actions
+        image_action_label = QLabel("Image Actions")
+        image_action_label.setStyleSheet(
+            "font-size: 15px; font-weight: bold;"
+        )
+        image_layout.addWidget(image_action_label)
+
+        image_action_layout = QHBoxLayout()
+        self.pull_image_button = QPushButton("Pull Image")
+        self.image_details_button = QPushButton("Image Details")
+        self.remove_image_button = QPushButton("Remove Image")
+        self.refresh_images_button = QPushButton("Refresh Images")
+
+        self.pull_image_button.clicked.connect(self.pull_docker_image)
+        self.image_details_button.clicked.connect(
+            self.show_docker_image_details
+        )
+        self.remove_image_button.clicked.connect(
+            self.remove_docker_image
+        )
+        self.refresh_images_button.clicked.connect(
+            self.refresh_docker_images
+        )
+
+        image_action_layout.addWidget(self.pull_image_button)
+        image_action_layout.addWidget(self.image_details_button)
+        image_action_layout.addWidget(self.remove_image_button)
+        image_action_layout.addWidget(self.refresh_images_button)
+
+        image_layout.addLayout(image_action_layout)
+        image_layout.addStretch()
+
+        self.docker_section_tabs.addTab(image_section, "Images")
+
+        # ---------------- Add tabs to layout ----------------
+        layout.addWidget(self.docker_section_tabs, 1)
 
         self.update_docker_action_buttons()
 
-        return page
+        return outer
 
     def refresh_docker_dashboard(self):
         summary = self.docker_manager.get_dashboard_summary()
@@ -1242,6 +1330,9 @@ class MainWindow(QMainWindow):
 
         self.filter_docker_containers()
         self.update_docker_action_buttons()
+
+        # Step 2.3: refresh images too
+        self.refresh_docker_images()
 
 
     def filter_docker_containers(self):
@@ -1559,7 +1650,238 @@ class MainWindow(QMainWindow):
 
         self.docker_resource_dialog = None
 
-    
+    # ==================================================
+    # Docker Image Management (Step 2.2)
+    # ==================================================
+    def refresh_docker_images(self):
+        result = self.docker_manager.get_images()
+
+        if not result["success"]:
+            self.docker_image_status.setText("Unable to load images")
+            QMessageBox.warning(
+                self,
+                "Docker Images",
+                result.get("error", "Unable to load Docker images.")
+            )
+            return
+
+        images = result.get("images", [])
+
+        self.docker_image_table.setRowCount(0)
+
+        for image in images:
+            row = self.docker_image_table.rowCount()
+            self.docker_image_table.insertRow(row)
+
+            values = [
+                image.get("repository", ""),
+                image.get("tag", ""),
+                image.get("id", "")[:12],
+                image.get("size", ""),
+                image.get("created", "")
+            ]
+
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+
+                if column == 2:
+                    item.setData(
+                        Qt.ItemDataRole.UserRole,
+                        image.get("id", "")
+                    )
+
+                self.docker_image_table.setItem(
+                    row, column, item
+                )
+
+        self.docker_image_status.setText(
+            f"Total images: {len(images)}"
+        )
+
+        self.filter_docker_images(
+            self.docker_image_search.text()
+        )
+
+    def filter_docker_images(self, search_text):
+        search_text = search_text.lower().strip()
+
+        for row in range(self.docker_image_table.rowCount()):
+            repository = self.docker_image_table.item(row, 0)
+            tag = self.docker_image_table.item(row, 1)
+
+            repository_text = (
+                repository.text().lower() if repository else ""
+            )
+            tag_text = tag.text().lower() if tag else ""
+
+            matches = (
+                search_text in repository_text
+                or search_text in tag_text
+            )
+
+            self.docker_image_table.setRowHidden(
+                row, not matches
+            )
+
+    def get_selected_docker_image_id(self):
+        row = self.docker_image_table.currentRow()
+
+        if row < 0:
+            QMessageBox.warning(
+                self,
+                "No Image Selected",
+                "Please select a Docker image first."
+            )
+            return None
+
+        item = self.docker_image_table.item(row, 2)
+
+        if item is None:
+            return None
+
+        return item.data(Qt.ItemDataRole.UserRole)
+
+    def pull_docker_image(self):
+        image_name, accepted = QInputDialog.getText(
+            self,
+            "Pull Docker Image",
+            "Enter image name (example: nginx:latest):"
+        )
+
+        if not accepted or not image_name.strip():
+            return
+
+        self.pull_image_button.setEnabled(False)
+        self.pull_image_button.setText("Pulling...")
+
+        QApplication.setOverrideCursor(
+            Qt.CursorShape.WaitCursor
+        )
+
+        try:
+            result = self.docker_manager.pull_image(image_name)
+
+            if result["success"]:
+                QMessageBox.information(
+                    self,
+                    "Image Pulled",
+                    f"Image '{image_name}' pulled successfully."
+                )
+                self.refresh_docker_images()
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Pull Failed",
+                    result.get("error")
+                    or result.get("message")
+                    or "Unable to pull image."
+                )
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.pull_image_button.setEnabled(True)
+            self.pull_image_button.setText("Pull Image")
+
+    def show_docker_image_details(self):
+        image_id = self.get_selected_docker_image_id()
+
+        if not image_id:
+            return
+
+        result = self.docker_manager.get_image_details(image_id)
+
+        if not result["success"]:
+            QMessageBox.warning(
+                self,
+                "Image Details",
+                result["error"]
+            )
+            return
+
+        details = result["details"]
+
+        text = (
+            f"Image ID:\n{details['id']}\n\n"
+            f"Repository Tags:\n"
+            f"{', '.join(details['repo_tags'])}\n\n"
+            f"Created:\n{details['created']}\n\n"
+            f"Size: {details['size']}\n"
+            f"Architecture: {details['architecture']}\n"
+            f"Operating System: {details['os']}\n"
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            f"Image Details - {image_id[:12]}"
+        )
+        dialog.resize(700, 500)
+
+        layout = QVBoxLayout(dialog)
+
+        title = QLabel(
+            f"Image: {image_id[:12]}"
+        )
+        title.setStyleSheet(
+            "font-size: 16px; font-weight: bold;"
+        )
+
+        view = QTextEdit()
+        view.setReadOnly(True)
+        view.setPlainText(text)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+
+        layout.addWidget(title)
+        layout.addWidget(view)
+        layout.addWidget(close_button)
+
+        dialog.exec()
+
+    def remove_docker_image(self):
+        image_id = self.get_selected_docker_image_id()
+
+        if not image_id:
+            return
+
+        row = self.docker_image_table.currentRow()
+
+        repository_item = self.docker_image_table.item(row, 0)
+        tag_item = self.docker_image_table.item(row, 1)
+
+        repository = repository_item.text() if repository_item else ""
+        tag = tag_item.text() if tag_item else ""
+
+        reply = QMessageBox.question(
+            self,
+            "Remove Docker Image",
+            f"Are you sure you want to remove:\n"
+            f"{repository}:{tag}?\n\n"
+            "This action cannot be undone.",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        result = self.docker_manager.remove_image(image_id)
+
+        if result["success"]:
+            QMessageBox.information(
+                self,
+                "Image Removed",
+                "Docker image removed successfully."
+            )
+            self.refresh_docker_images()
+        else:
+            QMessageBox.warning(
+                self,
+                "Remove Failed",
+                result.get("message")
+                or result.get("error")
+                or "Unable to remove image."
+            )
 
     # -------------------- Shared UI helpers --------------------
     @staticmethod
@@ -2954,7 +3276,10 @@ class MainWindow(QMainWindow):
                         Path(current) / filename
                     )
 
-        solution_files = list(path.glob("*.sln", "*.slnx"))
+        solution_files = (
+            list(path.glob("*.sln")) +
+            list(path.glob("*.slnx"))
+        )
         is_dotnet_project = bool(dotnet_projects or solution_files)
 
         # -------------------------------------------------
@@ -3043,15 +3368,25 @@ class MainWindow(QMainWindow):
             return
 
         # -------------------------------------------------
-        # Existing Python preparation
+        # Python Environment Preparation
+        # Automatic installation with user confirmation
         # -------------------------------------------------
+
         python_deps = self._python_dependencies()
 
-        if not python_deps and not (
-            (path / "requirements.txt").is_file()
-            or (path / "pyproject.toml").is_file()
-            or (path / "Pipfile").is_file()
-        ):
+        requirements_file = path / "requirements.txt"
+        pyproject_file = path / "pyproject.toml"
+        pipfile = path / "Pipfile"
+        setup_file = path / "setup.py"
+
+        has_manifest = any([
+            requirements_file.is_file(),
+            pyproject_file.is_file(),
+            pipfile.is_file(),
+            setup_file.is_file(),
+        ])
+
+        if not python_deps and not has_manifest:
             QMessageBox.information(
                 self,
                 "No Python Dependencies",
@@ -3061,32 +3396,59 @@ class MainWindow(QMainWindow):
 
         env_path = path / ".venv"
 
+        # Determine installation source
+        if requirements_file.is_file():
+            install_source = "requirements.txt"
+
+        elif pyproject_file.is_file():
+            install_source = "pyproject.toml"
+
+        elif setup_file.is_file():
+            install_source = "setup.py"
+
+        elif pipfile.is_file():
+            install_source = "Pipfile"
+
+        else:
+            install_source = "detected"
+
         message = [
             f"Project: {project.get('name')}",
             f"Path: {path}",
-            f"Python packages to install: {len(python_deps)}",
             "",
-            "A virtual environment will be created/reused at:",
+            f"Detected Python packages: {len(python_deps)}",
+            f"Dependency source: {install_source}",
+            "",
+            "Virtual Environment:",
             str(env_path),
             "",
-            "No system-wide pip installation will be performed.",
+            "The following operations will be performed:",
+            "1. Create or reuse project-local .venv",
+            "2. Upgrade pip, setuptools and wheel",
+            "3. Install Python dependencies",
+            "4. Verify dependencies using pip check",
+            "",
+            "No system-wide Python package installation.",
         ]
 
         if python_deps:
             message.extend([
                 "",
-                "Package requirements:",
-                *[f"• {item}" for item in python_deps[:30]],
+                "Detected Packages:",
+                *[
+                    f"• {item}"
+                    for item in python_deps[:30]
+                ],
             ])
 
             if len(python_deps) > 30:
                 message.append(
-                    f"…and {len(python_deps) - 30} more"
+                    f"...and {len(python_deps) - 30} more"
                 )
 
         answer = QMessageBox.question(
             self,
-            "Confirm Project-local Installation",
+            "Confirm Python Dependency Installation",
             "\n".join(message) + "\n\nContinue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -3094,16 +3456,22 @@ class MainWindow(QMainWindow):
 
         if answer != QMessageBox.Yes:
             self.workspace_log_append(
-                "Installation cancelled by user."
+                "Python dependency installation cancelled by user."
             )
             return
 
+        # Start installation worker
         self._set_workspace_busy(True)
+
         self.workspace_progress.setRange(0, 100)
         self.workspace_progress.setValue(0)
 
         self.workspace_log_append(
-            "Preparing project-local Python environment..."
+            "Starting Python environment preparation..."
+        )
+
+        self.workspace_log_append(
+            f"Dependency source: {install_source}"
         )
 
         self.workspace_worker = WorkspaceTaskWorker(
@@ -3115,22 +3483,257 @@ class MainWindow(QMainWindow):
         self.workspace_worker.log.connect(
             self.workspace_log_append
         )
+
         self.workspace_worker.progress.connect(
             self._workspace_install_progress
         )
+
         self.workspace_worker.completed.connect(
             self._workspace_install_completed
         )
+
         self.workspace_worker.failed.connect(
             self._workspace_task_failed
         )
+
         self.workspace_worker.finished.connect(
             lambda: self._set_workspace_busy(False)
         )
+
         self.workspace_worker.finished.connect(
             self.workspace_worker.deleteLater
         )
+
         self.workspace_worker.start()
+
+
+
+    @staticmethod
+    def _install_project_python_dependencies(
+        project_path,
+        dependencies,
+        log_callback=None,
+        progress_callback=None,
+    ):
+        import subprocess
+        import shutil
+        import re
+        import sys
+        from pathlib import Path
+        from datetime import datetime
+
+        path = Path(project_path).expanduser().resolve()
+
+        if not path.is_dir():
+            raise RuntimeError(f"Project directory not found: {path}")
+
+        env_path = path / ".venv"
+        python_exe = env_path / "bin" / "python"
+
+        def log(message):
+            if log_callback:
+                log_callback(str(message))
+
+        def progress(value, package=""):
+            if progress_callback:
+                progress_callback(int(value), str(package))
+
+        def run(command, timeout=300):
+            return subprocess.run(
+                command,
+                cwd=str(path),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+
+        # --------------------------------
+        # Step 1: Create or reuse venv
+        # --------------------------------
+        valid = False
+
+        if python_exe.is_file():
+            result = run([
+                str(python_exe),
+                "-c",
+                "import sys; print(sys.prefix != sys.base_prefix)",
+            ], timeout=30)
+
+            valid = (
+                result.returncode == 0
+                and result.stdout.strip() == "True"
+            )
+
+        if not valid:
+            if env_path.exists():
+                backup = path / (
+                    ".venv.invalid-"
+                    + datetime.now().strftime("%Y%m%d-%H%M%S")
+                )
+
+                log(f"Moving invalid environment to {backup}")
+
+                shutil.move(str(env_path), str(backup))
+
+            system_python = shutil.which("python3")
+
+            if not system_python:
+                raise RuntimeError("Python 3 is not installed.")
+
+            log("Creating virtual environment...")
+            progress(-1, "Creating virtual environment")
+
+            result = run([
+                system_python,
+                "-m",
+                "venv",
+                str(env_path),
+            ])
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Virtual environment creation failed:\n"
+                    + result.stderr
+                )
+
+            log("Virtual environment created successfully.")
+
+        else:
+            log("Existing virtual environment reused.")
+
+        # --------------------------------
+        # Step 2: Upgrade pip
+        # --------------------------------
+        progress(-1, "Upgrading pip")
+        log("Upgrading pip, setuptools and wheel...")
+
+        upgrade = run([
+            str(python_exe),
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "pip",
+            "setuptools",
+            "wheel",
+        ], timeout=600)
+
+        log(upgrade.stdout)
+        log(upgrade.stderr)
+
+        if upgrade.returncode != 0:
+            raise RuntimeError(
+                "Failed to upgrade pip:\n"
+                + upgrade.stderr
+            )
+
+        # --------------------------------
+        # Step 3: Separate PyTorch
+        # --------------------------------
+        torch_deps = []
+        other_deps = []
+
+        for dependency in dependencies:
+            package_name = re.split(
+                r"[<>=!~;\[]",
+                dependency.strip(),
+                maxsplit=1,
+            )[0].strip().lower()
+
+            if package_name == "torch":
+                torch_deps.append(dependency)
+            else:
+                other_deps.append(dependency)
+
+        total = len(dependencies)
+
+        # --------------------------------
+        # Step 4: Install PyTorch
+        # --------------------------------
+        if torch_deps:
+            log("Installing CPU-only PyTorch...")
+            progress(10, "Installing PyTorch")
+
+            result = run([
+                str(python_exe),
+                "-m",
+                "pip",
+                "install",
+                "--index-url",
+                "https://download.pytorch.org/whl/cpu",
+                *torch_deps,
+            ], timeout=1800)
+
+            log(result.stdout)
+            log(result.stderr)
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "PyTorch installation failed:\n"
+                    + result.stderr
+                )
+
+        # --------------------------------
+        # Step 5: Install other packages
+        # --------------------------------
+        if other_deps:
+            log(f"Installing {len(other_deps)} other packages...")
+
+            result = run([
+                str(python_exe),
+                "-m",
+                "pip",
+                "install",
+                *other_deps,
+            ], timeout=1800)
+
+            log(result.stdout)
+            log(result.stderr)
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "Python dependency installation failed:\n"
+                    + result.stderr
+                )
+
+        if not dependencies:
+            log("No Python packages detected.")
+
+        # --------------------------------
+        # Step 6: Verify dependencies
+        # --------------------------------
+        progress(-1, "Verifying dependencies")
+        log("Running pip check...")
+
+        check = run([
+            str(python_exe),
+            "-m",
+            "pip",
+            "check",
+        ], timeout=180)
+
+        verification = (
+            check.stdout + check.stderr
+        ).strip()
+
+        verification_ok = check.returncode == 0
+
+        if verification_ok:
+            log("Dependency verification passed: pip check OK.")
+        else:
+            log("Dependency verification failed:")
+            log(verification)
+
+        progress(100, "Completed")
+
+        return {
+            "path": str(env_path),
+            "python": str(python_exe),
+            "verification_ok": verification_ok,
+            "verification": verification,
+            "installed_count": total,
+    }
 
     # ------------- Install (static, runs in worker thread) -------------
     @staticmethod
@@ -4767,6 +5370,41 @@ class MainWindow(QMainWindow):
         QTableCornerButton::section {
             background-color: #192536;
             border: none;
+        }
+
+                /* ---------- TAB WIDGET (Docker Sections) ---------- */
+
+        QTabWidget::pane {
+            border: 1px solid #2B3A50;
+            border-radius: 8px;
+            background-color: #151E2B;
+            top: -1px;
+        }
+
+        QTabBar::tab {
+            background-color: #192333;
+            color: #91A3BA;
+            border: 1px solid #2B3A50;
+            border-bottom: none;
+            padding: 8px 18px;
+            margin-right: 2px;
+            border-top-left-radius: 7px;
+            border-top-right-radius: 7px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        QTabBar::tab:hover {
+            background-color: #24354A;
+            color: #FFFFFF;
+        }
+
+        QTabBar::tab:selected {
+            background-color: #163448;
+            color: #43D9F5;
+            border: 1px solid #27617A;
+            border-bottom: none;
+            font-weight: bold;
         }
 
         /* ---------- TEXT EDITOR / TERMINAL ---------- */

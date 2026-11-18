@@ -596,3 +596,207 @@ class DockerManager:
             "stats": stats,
             "error": None
         }
+
+    def get_images(self):
+        if not self.is_docker_installed():
+            return {
+                "success": False,
+                "images": [],
+                "error": "Docker is not installed."
+            }
+
+        status = self.get_docker_status()
+
+        if status["status"] != "running":
+            return {
+                "success": False,
+                "images": [],
+                "error": "Docker daemon is not running or accessible."
+            }
+
+        result = self.execute_command(
+            [
+                self.docker_path,
+                "image",
+                "ls",
+                "--no-trunc",
+                "--format",
+                "{{json .}}"
+            ],
+            timeout=15
+        )
+
+        if not result["success"]:
+            return {
+                "success": False,
+                "images": [],
+                "error": result["error"]
+            }
+
+        images = []
+
+        for line in result["output"].splitlines():
+            try:
+                data = json.loads(line)
+
+                images.append({
+                    "repository": data.get("Repository", ""),
+                    "tag": data.get("Tag", ""),
+                    "id": data.get("ID", ""),
+                    "created": data.get("CreatedSince", ""),
+                    "size": data.get("Size", "")
+                })
+
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        return {
+            "success": True,
+            "images": images,
+            "total": len(images),
+            "error": None
+        }
+
+    def get_image_details(self, image_id):
+        if not self.is_docker_installed():
+            return {
+                "success": False,
+                "details": None,
+                "error": "Docker is not installed."
+            }
+
+        result = self.execute_command(
+            [
+                self.docker_path,
+                "image",
+                "inspect",
+                image_id
+            ],
+            timeout=15
+        )
+
+        if not result["success"]:
+            return {
+                "success": False,
+                "details": None,
+                "error": result["error"]
+            }
+
+        try:
+            data = json.loads(result["output"])[0]
+
+            config = data.get("Config") or {}
+            size = data.get("Size", 0)
+
+            details = {
+                "id": data.get("Id", ""),
+                "repo_tags": data.get("RepoTags") or [],
+                "created": data.get("Created", ""),
+                "size": self.format_image_size(size),
+                "architecture": data.get("Architecture", ""),
+                "os": data.get("Os", ""),
+                "author": data.get("Author", ""),
+                "working_dir": config.get("WorkingDir", ""),
+                "entrypoint": config.get("Entrypoint") or [],
+                "command": config.get("Cmd") or [],
+                "environment": config.get("Env") or [],
+                "exposed_ports": list(
+                    (config.get("ExposedPorts") or {}).keys()
+                ),
+                "volumes": list(
+                    (config.get("Volumes") or {}).keys()
+                )
+            }
+
+            return {
+                "success": True,
+                "details": details,
+                "error": None
+            }
+
+        except (json.JSONDecodeError, IndexError, TypeError):
+            return {
+                "success": False,
+                "details": None,
+                "error": "Unable to parse image details."
+            }
+
+    def format_image_size(self, size):
+        try:
+            size = float(size)
+
+            for unit in ["B", "KB", "MB", "GB", "TB"]:
+                if size < 1024:
+                    return f"{size:.2f} {unit}"
+
+                size /= 1024
+
+            return f"{size:.2f} PB"
+
+        except (ValueError, TypeError):
+            return "Unknown"
+
+
+    def pull_image(self, image_name):
+        if not self.is_docker_installed():
+            return {
+                "success": False,
+                "message": "Docker is not installed."
+            }
+
+        if not image_name or not image_name.strip():
+            return {
+                "success": False,
+                "message": "Image name cannot be empty."
+            }
+
+        result = self.execute_command(
+            [
+                self.docker_path,
+                "pull",
+                image_name.strip()
+            ],
+            timeout=600
+        )
+
+        return {
+            "success": result["success"],
+            "message": (
+                result["output"]
+                if result["success"]
+                else result["error"]
+            )
+        }
+
+
+    def remove_image(self, image_id):
+        if not self.is_docker_installed():
+            return {
+                "success": False,
+                "message": "Docker is not installed."
+            }
+
+        if not image_id:
+            return {
+                "success": False,
+                "message": "Image ID is required."
+            }
+
+        result = self.execute_command(
+            [
+                self.docker_path,
+                "image",
+                "rm",
+                image_id
+            ],
+            timeout=30
+        )
+
+        return {
+            "success": result["success"],
+            "message": (
+                result["output"]
+                if result["success"]
+                else result["error"]
+            )
+        }
